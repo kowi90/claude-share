@@ -32,8 +32,10 @@
     "build": "bun scripts/build.ts",
     "dev:share": "bun claude-share/index.ts",
     "dev:connect": "bun claude-connect/index.ts",
+    "dev:manager": "bun manager/index.ts",
     "start:share": "node dist/claude-share/index.js",
     "start:connect": "node dist/claude-connect/index.js",
+    "start:manager": "node dist/manager/index.js",
     "lint": "oxlint claude-share/src claude-connect/src shared",
     "fmt": "oxfmt --config .oxfmtrc.json claude-share/src claude-connect/src shared",
     "prepublishOnly": "npm run lint && npm run build"

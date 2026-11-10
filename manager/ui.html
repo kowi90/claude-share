@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-share manager</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --surface: #ffffff; --text: #1d1c1a; --muted: #6d6a63;
+    --border: #e3e0d8; --accent: #c2410c; --accent-text: #ffffff;
+    --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --code-bg: #f1efe9;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161513; --surface: #201f1c; --text: #ecebe7; --muted: #9c988e;
+      --border: #34322d; --accent: #f97316; --accent-text: #1a0f06;
+      --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --code-bg: #2a2925;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { margin-bottom: 28px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 16px; margin: 0 0 16px; }
+  .sub { color: var(--muted); margin: 0; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px; margin-bottom: 16px;
+  }
+  label { display: block; font-weight: 600; font-size: 13px; margin: 14px 0 6px; }
+  label:first-of-type { margin-top: 0; }
+  .hint { color: var(--muted); font-size: 13px; font-weight: 400; margin: 4px 0 0; }
+  input[type=text], input[type=password], select, textarea {
+    width: 100%; padding: 9px 11px; font: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+  }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; resize: vertical; min-height: 64px; }
+  input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 200px; }
+  .check { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; font-size: 14px; margin-top: 14px; }
+  .check input { margin-top: 4px; }
+  .terms { font-size: 13px; color: var(--muted); background: var(--code-bg); border-radius: 7px; padding: 10px 12px; margin-top: 14px; }
+  button {
+    font: inherit; font-weight: 600; font-size: 14px; cursor: pointer;
+    padding: 8px 14px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; align-items: center; }
+  .error { color: var(--bad); font-size: 14px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  .inst-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .inst-head h3 { margin: 0; font-size: 16px; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; border: 1px solid currentColor; }
+  .s-running { color: var(--ok); } .s-starting { color: var(--warn); }
+  .s-stopped { color: var(--muted); } .s-failed, .s-gone { color: var(--bad); }
+  .link { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  .link span { font-size: 12px; color: var(--muted); width: 48px; flex: none; }
+  .link input { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  ul.machines { list-style: none; padding: 0; margin: 8px 0 0; }
+  ul.machines li { display: flex; gap: 8px; align-items: center; font-size: 14px; padding: 3px 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .note { font-size: 13px; color: var(--muted); margin-top: 12px; }
+  .empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>claude-share manager</h1>
+    <p class="sub">Start a share of your Claude Code subscription on this server, then send the connect link to a friend.</p>
+  </header>
+
+  <section class="card">
+    <h2>New share</h2>
+    <form id="create" autocomplete="off">
+      <label for="name">Name</label>
+      <input id="name" type="text" maxlength="64" required placeholder="e.g. Alex's Claude">
+      <p class="hint">Shown to people who connect.</p>
+
+      <label for="token">Claude token</label>
+      <textarea id="token" required spellcheck="false" placeholder="sk-ant-oat01-…"></textarea>
+      <p class="hint">Run <code>claude setup-token</code> on your own machine and paste the token it prints. It is passed to your share process in memory only and is never stored on disk.</p>
+
+      <div class="row">
+        <div>
+          <label for="duration">Share for</label>
+          <select id="duration">
+            <option value="6">6 hours</option>
+            <option value="24" selected>24 hours</option>
+            <option value="168">1 week</option>
+          </select>
+        </div>
+        <div id="password-wrap" hidden>
+          <label for="password">Manager password</label>
+          <input id="password" type="password">
+        </div>
+      </div>
+
+      <label class="check" id="tunnel-wrap" hidden>
+        <input id="tunnel" type="checkbox">
+        <span>Also expose over the internet via a bore tunnel <span class="hint">(experimental)</span></span>
+      </label>
+
+      <div class="terms">
+        You share your Claude Code subscription at your own risk. This is an open-source project and its
+        authors are not liable for any damage or suspension of your subscription. Only share with people you
+        trust — sharing with many people is a direct route to an account ban.
+      </div>
+      <label class="check">
+        <input id="terms" type="checkbox" required>
+        <span>I understand and want to continue</span>
+      </label>
+
+      <div class="actions">
+        <button class="primary" type="submit" id="submit">Start share</button>
+        <span class="error" id="create-error" role="alert"></span>
+      </div>
+      <p class="note" id="slots"></p>
+    </form>
+  </section>
+
+  <h2>Your shares</h2>
+  <div id="list"><p class="empty">No shares started from this browser yet.</p></div>
+  <p class="note">Shares are remembered in this browser only. If you clear site data you can no longer manage them; they still stop when their time runs out.</p>
+</main>
+
+<script>
+(() => {
+  const STORE = "claude-share-instances";
+  const $ = (id) => document.getElementById(id);
+
+  function loadOwned() {
+    try { return JSON.parse(localStorage.getItem(STORE) || "[]"); } catch { return []; }
+  }
+  function saveOwned(list) {
+    try { localStorage.setItem(STORE, JSON.stringify(list)); } catch {}
+  }
+  let owned = loadOwned();
+  const latest = new Map();
+
+  function el(tag, attrs = {}, ...children) {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "class") n.className = v;
+      else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+      else if (v !== false && v != null) n.setAttribute(k, v === true ? "" : v);
+    }
+    for (const c of children.flat()) if (c != null) n.append(c);
+    return n;
+  }
+
+  function remaining(iso) {
+    if (!iso) return "";
+    const ms = new Date(iso).getTime() - Date.now();
+    if (ms <= 0) return "expired";
+    const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+    return h >= 48 ? `${Math.floor(h / 24)}d ${h % 24}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+  function ago(iso) {
+    const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 10) return "just now";
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    return `${Math.floor(s / 3600)}h ago`;
+  }
+
+  async function copy(text, btn) {
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch {
+      // Clipboard API needs HTTPS; fall back for plain-HTTP deployments
+      const ta = el("textarea", { style: "position:fixed;opacity:0" }); ta.value = text;
+      document.body.append(ta); ta.select();
+      try { ok = document.execCommand("copy"); } catch {}
+      ta.remove();
+    }
+    const prev = btn.textContent;
+    btn.textContent = ok ? "Copied" : "Select & copy manually";
+    setTimeout(() => (btn.textContent = prev), 1500);
+  }
+
+  async function api(method, url, entry, body) {
+    const headers = { "content-type": "application/json" };
+    if (entry) headers["x-owner-key"] = entry.ownerKey;
+    const pw = $("password").value;
+    if (pw) headers["x-manager-password"] = pw;
+    const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  }
+
+  function linkRow(label, url) {
+    const input = el("input", { type: "text", readonly: true, value: url, onfocus: (e) => e.target.select() });
+    const btn = el("button", { type: "button", onclick: () => copy(url, btn) }, "Copy");
+    return el("div", { class: "link" }, el("span", {}, label), input, btn);
+  }
+
+  function renderInstance(entry) {
+    const d = latest.get(entry.id);
+    const state = d ? d.state : "loading";
+    const card = el("div", { class: "card" });
+
+    const title = el("div", {},
+      el("h3", {}, d?.name || entry.name),
+      el("div", { class: "meta" },
+        d ? `port ${d.port}` : "",
+        d?.sharedUntil && state === "running" ? ` · ${remaining(d.sharedUntil)} left` : "",
+      ),
+    );
+    card.append(el("div", { class: "inst-head" }, title, el("span", { class: `badge s-${state}` }, state)));
+
+    if (state === "gone") {
+      card.append(el("p", { class: "note" }, "This share no longer exists on the server (it was removed or the server restarted)."));
+    }
+    if (d?.error) card.append(el("p", { class: "error" }, d.error));
+    if (d?.tunnelDown) card.append(el("p", { class: "error" }, "The internet tunnel disconnected — only the direct link works."));
+    if (d && state === "running" && new Date(d.tokenExpiresAt).getTime() - Date.now() < 24 * 3600000) {
+      card.append(el("p", { class: "error" }, `Your Claude token expires in ${remaining(d.tokenExpiresAt)} — after that, requests will fail.`));
+    }
+
+    if (state === "running") {
+      if (d.connect.lan || d.connect.public) {
+        card.append(el("p", { class: "note" }, "One-time link — the first device that uses it is paired. Your friend runs:"));
+        card.append(el("p", {}, el("code", {}, "claude-connect --share <link>")));
+        if (d.connect.lan) card.append(linkRow("Direct", d.connect.lan));
+        if (d.connect.public) card.append(linkRow("Tunnel", d.connect.public));
+        if (d.tunnel && !d.connect.public) card.append(el("p", { class: "note" }, "Tunnel is not available."));
+      } else if (d.pairingCodeUsed) {
+        card.append(el("p", { class: "note" }, "The pairing link has been used. Create a new one to pair another device."));
+      }
+
+      card.append(el("p", { class: "meta", style: "margin:16px 0 0" }, `Paired devices (${d.machines.length})`));
+      if (d.machines.length) {
+        card.append(el("ul", { class: "machines" }, d.machines.map((m) =>
+          el("li", {},
+            el("span", { class: "dot", style: `background:var(${m.active ? "--ok" : "--warn"})` }),
+            el("span", {}, m.name),
+            el("span", { class: "meta" }, `· ${m.active ? "active" : "idle"} · ${ago(m.lastActiveAt)}`),
+          ),
+        )));
+      }
+    } else if (state === "starting") {
+      card.append(el("p", { class: "note" }, "Starting up…"));
+    }
+
+    const actions = el("div", { class: "actions" });
+    if (state === "running" && d.pairingCodeUsed) {
+      actions.append(el("button", { type: "button", onclick: () => act(entry, "POST", "regenerate") }, "New pairing link"));
+    }
+    if (state === "running" || state === "starting") {
+      actions.append(el("button", { type: "button", class: "danger", onclick: () => act(entry, "POST", "stop") }, "Stop sharing"));
+    } else {
+      actions.append(el("button", { type: "button", onclick: () => remove(entry) }, "Remove"));
+    }
+    card.append(actions);
+    return card;
+  }
+
+  function render() {
+    const list = $("list");
+    list.replaceChildren();
+    if (!owned.length) {
+      list.append(el("p", { class: "empty" }, "No shares started from this browser yet."));
+      return;
+    }
+    // Keep focus/selection stable: skip re-render while user is selecting a link
+    for (const entry of [...owned].reverse()) list.append(renderInstance(entry));
+  }
+
+  async function refresh() {
+    await Promise.all(owned.map(async (entry) => {
+      try {
+        const { res, data } = await api("GET", `/api/instances/${entry.id}`, entry);
+        if (res.status === 404) latest.set(entry.id, { state: "gone", name: entry.name });
+        else if (res.ok) latest.set(entry.id, data);
+      } catch {}
+    }));
+    const active = document.activeElement;
+    if (active && active.closest && active.closest("#list") && active.tagName === "INPUT") return;
+    render();
+  }
+
+  async function act(entry, method, action) {
+    await api(method, `/api/instances/${entry.id}/${action}`, entry);
+    setTimeout(refresh, 400);
+  }
+
+  async function remove(entry) {
+    const d = latest.get(entry.id);
+    if (d && d.state !== "gone") await api("DELETE", `/api/instances/${entry.id}`, entry);
+    owned = owned.filter((e) => e.id !== entry.id);
+    latest.delete(entry.id);
+    saveOwned(owned);
+    render();
+  }
+
+  async function loadConfig() {
+    try {
+      const cfg = await (await fetch("/api/config")).json();
+      $("password-wrap").hidden = !cfg.passwordRequired;
+      $("password").required = cfg.passwordRequired;
+      $("tunnel-wrap").hidden = !cfg.tunnelAvailable;
+      $("slots").textContent = `${cfg.freeSlots} free share slot${cfg.freeSlots === 1 ? "" : "s"} on this server.`;
+    } catch {}
+  }
+
+  $("create").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $("create-error");
+    err.textContent = "";
+    $("submit").disabled = true;
+    try {
+      const { res, data } = await api("POST", "/api/instances", null, {
+        name: $("name").value,
+        token: $("token").value,
+        durationHours: Number($("duration").value),
+        tunnel: $("tunnel").checked,
+        acceptTerms: $("terms").checked,
+      });
+      if (!res.ok) { err.textContent = data.error || `Failed (HTTP ${res.status})`; return; }
+      owned.push({ id: data.id, ownerKey: data.ownerKey, name: $("name").value.trim() });
+      saveOwned(owned);
+      $("token").value = "";
+      $("name").value = "";
+      $("terms").checked = false;
+      await refresh();
+      loadConfig();
+    } catch (ex) {
+      err.textContent = "Could not reach the server.";
+    } finally {
+      $("submit").disabled = false;
+    }
+  });
+
+  loadConfig();
+  render();
+  refresh();
+  setInterval(refresh, 2000);
+  setInterval(loadConfig, 15000);
+})();
+</script>
+</body>
+</html>

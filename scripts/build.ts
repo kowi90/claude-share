@@ -28,3 +28,7 @@ build("claude-share/index.ts", "dist/claude-share/index.js", [
 build("claude-connect/index.ts", "dist/claude-connect/index.js", [
   "--define", `process.env.NODE_ENV="production"`,
 ]);
+
+build("manager/index.ts", "dist/manager/index.js", [
+  "--define", `process.env.NODE_ENV="production"`,
+]);
