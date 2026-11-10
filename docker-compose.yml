@@ -1,0 +1,26 @@
+services:
+  claude-share:
+    build:
+      context: .
+      args:
+        # Only needed for the optional internet tunnel (baked in at build time)
+        BORE_SERVER: ${BORE_SERVER:-bore.pub}
+        BORE_PASSWORD: ${BORE_PASSWORD:-}
+    image: claude-share-manager
+    restart: unless-stopped
+    init: true
+    environment:
+      # The IP or hostname receivers use to reach this server. Put into connect
+      # links and the TLS certificate, so it must be exactly what they connect to.
+      ADVERTISE_HOST: ${ADVERTISE_HOST:?set ADVERTISE_HOST to this server's IP or hostname}
+      # Required to create shares when set. Leave empty to let anyone who can
+      # reach the web interface start a share.
+      MANAGER_PASSWORD: ${MANAGER_PASSWORD:-}
+      # Set to 0 to hide the bore internet tunnel option
+      TUNNEL: ${TUNNEL:-1}
+      # One port per concurrent share. Keep in sync with the port mapping below.
+      SHARE_PORT_START: 2586
+      SHARE_PORT_END: 2595
+    ports:
+      - "${MANAGER_HOST_PORT:-8080}:8080"   # web interface
+      - "2586-2595:2586-2595"              # share instances (host port must equal container port)
