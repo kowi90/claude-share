@@ -77,6 +77,31 @@ npx -p @0xpv/claude-share claude-connect --share <connect-url>
 
 ---
 
+## Docker server with web interface
+
+Run claude-share on a server so several people can each start their own share from a browser.
+
+```bash
+cp .env.docker.example .env # set ADVERTISE_HOST (and MANAGER_PASSWORD)
+docker compose up -d --build
+```
+
+Open `http://<server>:8080`, paste a token from `claude setup-token`, pick a duration and press **Start share**. The page shows a one-time `claudeshare://` link to send to the receiver, who runs `claude-connect --share <link>` as usual.
+
+| Variable | Purpose |
+| --- | --- |
+| `ADVERTISE_HOST` | **Required.** IP or hostname receivers use to reach the server. Goes into the connect links and the TLS certificate. |
+| `MANAGER_PASSWORD` | Required to create shares when set. Leave empty to let anyone who can reach the page create one. |
+| `SHARE_PORT_START` / `SHARE_PORT_END` | Port range, one port per concurrent share (default `2586`–`2595`). Must match the `ports:` mapping, with host port = container port. |
+| `TUNNEL` | `0` hides the bore internet tunnel option. |
+| `BORE_SERVER` / `BORE_PASSWORD` | Build args for a self-hosted bore server. |
+
+Each share runs as its own `claude-share --headless` process. The token is handed to it over IPC and never written to disk, so shares don't survive a container restart: start them again from the page. Each share is managed only from the browser that created it.
+
+The web interface is plain HTTP and shows the connect link, which contains the pairing key. Put it behind an HTTPS reverse proxy, or only reach it over a trusted network.
+
+---
+
 ## Requirements
 
 - **Node.js 18+** on both machines
@@ -88,7 +113,7 @@ npx -p @0xpv/claude-share claude-connect --share <connect-url>
 
 ## Security model
 
-- The sharer's OAuth token is read from the macOS Keychain and injected into requests in-memory. It is never transmitted to the receiver.
+- The sharer's OAuth token is read from the macOS Keychain (or `~/.claude/.credentials.json` on Linux) and injected into requests in-memory. It is never transmitted to the receiver. In Docker it is passed to the share process over IPC and never written to disk.
 - Only these Anthropic endpoints are proxied: `POST /v1/messages`, `GET /v1/models`, `/api/hello`, and OAuth flows on `platform.anthropic.com` / `platform.claude.com`.
 - File upload (`/v1/files`), fine-tuning, and assistants endpoints are blocked.
 - All non-Anthropic HTTPS traffic passes through as an opaque TCP tunnel — the proxy never sees the contents.
@@ -104,8 +129,11 @@ bun run dev:share
 
 # Receiver
 bun run dev:connect --share <connect-url>
+
+# Web manager (Docker server mode)
+ADVERTISE_HOST=127.0.0.1 bun run dev:manager
 ```
 
 Set `TUNNEL=0` to skip the bore tunnel during local development.
 
-Build: `bun run build` — compiles both binaries into their `dist/` folders.
+Build: `bun run build` — compiles both binaries and the manager into `dist/`.

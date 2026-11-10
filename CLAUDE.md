@@ -39,6 +39,10 @@ Build: `bun run build` (compiles both via bun build). Lint: `bun run lint`.
 `~/.claude-share/connections/<machineId>.json` — pruned on startup if `sharedUntil` is past.  
 `~/.claude-share/config.json` — device name.
 
+## Manager (Docker)
+
+`manager/index.ts` is a Hono web app (`dist/manager/index.js`, `Dockerfile`, `docker-compose.yml`) that spawns one `claude-share --headless --accept-terms --port=N --duration-ms=X` child per share. `claude-share/headless.ts` holds the IPC protocol: the parent sends `init` (credentials), `regenerate` and `stop`; the child sends `status` every second and `fatal`. Credentials come over IPC via `setPlatformOverride()`, never argv, env or disk. The child exits when the IPC channel disconnects. `ADVERTISE_HOST` replaces the auto-detected LAN IP for both the URLs and the cert SAN (IP or DNS).
+
 ## Known quirks
 
 - `ensureBore()` must run **before** any `p.intro()`/`p.select()` calls. clack's `p.confirm()` tears down stdin in a way ink can't recover from if it runs after other prompts.
