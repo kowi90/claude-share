@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 import forge from "node-forge";
 
 export interface ServerCert {
@@ -37,7 +39,12 @@ export async function generateServerCert(
     { type: 2, value: publicHostname },
     { type: 7, ip: "127.0.0.1" },
   ];
-  if (lanIp) altNames.push({ type: 7, ip: lanIp });
+  // lanIp is normally an IP, but ADVERTISE_HOST may also be a DNS name
+  if (lanIp) {
+    altNames.push(
+      isIP(lanIp) ? { type: 7, ip: lanIp } : { type: 2, value: lanIp },
+    );
+  }
 
   cert.setExtensions([
     { name: "basicConstraints", cA: false },

@@ -53,6 +53,13 @@ import {
 import { App } from "./tui/App";
 import { isBoreInstalled, installBore, startTunnel } from "./tunnel/index";
 import { verifyTokenOrExit } from "./proxy/verifyToken";
+import {
+  HEADLESS,
+  flagValue,
+  headlessFail,
+  receiveInit,
+  startHeadlessReporting,
+} from "./headless";
 
 const CLAUDE_SHARE_CONFIG = path.join(
   os.homedir(),
@@ -139,12 +146,38 @@ async function promptDuration(): Promise<number> {
   return choice as number;
 }
 
-async function main() {
-  if (process.argv.includes("--upgrade")) {
-    await forceUpgrade();
-    return;
+interface SetupResult {
+  boreReady: boolean;
+  duration: number;
+  systemName?: string;
+}
+
+const MAX_HEADLESS_DURATION = 7 * 24 * 60 * 60 * 1000;
+
+/** Non-interactive setup: options come from flags, credentials from IPC. */
+async function headlessSetup(): Promise<SetupResult> {
+  if (!process.argv.includes("--accept-terms")) {
+    return headlessFail("--headless requires --accept-terms");
   }
 
+  const duration = parseInt(flagValue("--duration-ms") ?? "", 10);
+  if (!Number.isFinite(duration) || duration <= 0 || duration > MAX_HEADLESS_DURATION) {
+    return headlessFail("--duration-ms must be between 1 and 604800000 (1 week)");
+  }
+
+  const { systemName } = await receiveInit();
+  await initToken();
+
+  let boreReady = false;
+  if (process.argv.includes("--tunnel")) {
+    boreReady = await isBoreInstalled();
+    if (!boreReady) logger.warn("--tunnel requested but bore is not installed");
+  }
+
+  return { boreReady, duration, systemName };
+}
+
+async function interactiveSetup(): Promise<SetupResult> {
   await checkForUpdate();
 
   p.intro("claude-share");
@@ -216,6 +249,18 @@ async function main() {
   await verifyTokenOrExit();
 
   const duration = await promptDuration();
+  return { boreReady, duration };
+}
+
+async function main() {
+  if (process.argv.includes("--upgrade")) {
+    await forceUpgrade();
+    return;
+  }
+
+  const { boreReady, duration, systemName: systemNameOverride } = HEADLESS
+    ? await headlessSetup()
+    : await interactiveSetup();
   const session = createSession(duration);
 
   const DEFAULT_PORT = 2586;
@@ -234,7 +279,9 @@ async function main() {
     portFlag != null && !isNaN(portFlag)
       ? portFlag
       : parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
-  const lanIp = getLanIp();
+  // ADVERTISE_HOST: the address receivers should use (required in Docker, where
+  // the detected interface IP is the container's private address)
+  const lanIp = process.env.ADVERTISE_HOST?.trim() || getLanIp();
   let lanUrl = lanIp ? `https://${lanIp}:${PORT}` : null;
   let loopbackUrl = `http://localhost:${PORT}`;
 
@@ -254,7 +301,7 @@ async function main() {
   // Mutable — publicUrl is filled in after the tunnel starts
   const urls = { public: null as string | null, lan: lanUrl };
   const sharerAccount = readSharerAccount();
-  const systemName = await getSystemName();
+  const systemName = systemNameOverride || (await getSystemName());
 
   // Hono API on a random localhost-only port — not exposed externally
   const apiApp = createApiApp(
@@ -345,6 +392,7 @@ async function main() {
     detector.listen(PORT, resolve);
   }).catch(async (err: NodeJS.ErrnoException) => {
     if (err.code !== "EADDRINUSE") throw err;
+    if (HEADLESS) return headlessFail(`port ${PORT} is already in use`);
 
     const kill = await p.confirm({
       message: `Port ${PORT} is already in use. Kill the process and continue?`,
@@ -447,8 +495,26 @@ async function main() {
     });
   }
 
-  const { unmount, rerender } = render(makeAppElement());
-  rerenderApp = rerender;
+  let unmount = () => {};
+  if (HEADLESS) {
+    startHeadlessReporting(
+      () => ({
+        port: PORT,
+        publicUrl,
+        lanUrl,
+        sharedUntil: session.sharedUntil.toISOString(),
+        tunnelDown,
+      }),
+      () => {
+        cleanup();
+        process.exit(0);
+      },
+    );
+  } else {
+    const app = render(makeAppElement());
+    unmount = app.unmount;
+    rerenderApp = app.rerender;
+  }
 
   process.on("SIGINT", () => {
     unmount();
@@ -475,5 +541,6 @@ async function main() {
 
 main().catch((err) => {
   logger.error("Fatal error in main", err);
-  process.exit(1);
+  if (HEADLESS) void headlessFail((err as Error)?.message ?? String(err));
+  else process.exit(1);
 });

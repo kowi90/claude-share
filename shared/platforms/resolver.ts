@@ -10,6 +10,7 @@ const SUPPORTED = {
 type SupportedPlatform = keyof typeof SUPPORTED;
 
 let _cached: PlatformOps | null = null;
+let _override: Partial<PlatformOps> | null = null;
 
 export function platform(): PlatformOps {
   if (_cached) return _cached;
@@ -22,6 +23,15 @@ export function platform(): PlatformOps {
     process.exit(1);
   }
 
-  _cached = SUPPORTED[p];
+  _cached = _override ? { ...SUPPORTED[p], ..._override } : SUPPORTED[p];
   return _cached;
+}
+
+/**
+ * Replaces individual platform operations (e.g. credential reading in headless
+ * mode, where credentials arrive over IPC instead of from the keychain).
+ */
+export function setPlatformOverride(ops: Partial<PlatformOps>): void {
+  _override = ops;
+  _cached = null;
 }
