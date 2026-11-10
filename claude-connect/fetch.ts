@@ -1,4 +1,5 @@
 import https from "node:https";
+import { isIP } from "node:net";
 
 export interface ApiFetchOptions {
   method?: string;
@@ -47,8 +48,12 @@ export async function apiFetch(
           ca,
           rejectUnauthorized,
 
-          // Important: node fails to derive servername automatically when dealing with IP based URLs
-          servername: parsed.hostname,
+          // SNI must be a DNS name (RFC 6066): Node throws ERR_INVALID_ARG_VALUE
+          // if servername is an IP. For IPs we omit it; the cert is still
+          // verified against the IP SAN via `hostname`.
+          ...(isIP(parsed.hostname.replace(/^\[|\]$/g, ""))
+            ? {}
+            : { servername: parsed.hostname }),
         },
         (res) => {
           let data = "";
