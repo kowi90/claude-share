@@ -7,14 +7,19 @@ import { promisify } from "node:util";
 
 import * as p from "@clack/prompts";
 
+import { findExecutable } from "@shared/exec";
+
 const execFileAsync = promisify(execFile);
 
 // Baked in at build time via --define; fall back to bore.pub in dev mode.
 const BORE_SERVER = process.env.BORE_SERVER ?? "bore.pub";
 const BORE_PASSWORD = process.env.BORE_PASSWORD ?? "";
 
-// Where we install bore on Linux when it isn't already in PATH
-const BORE_LOCAL_PATH = path.join(os.homedir(), ".local", "bin", "bore");
+const IS_WINDOWS = process.platform === "win32";
+const BORE_BINARY = IS_WINDOWS ? "bore.exe" : "bore";
+
+// Where we install bore on Linux/Windows when it isn't already in PATH
+const BORE_LOCAL_PATH = path.join(os.homedir(), ".local", "bin", BORE_BINARY);
 
 export interface Tunnel {
   publicUrl: string | null;
@@ -24,11 +29,8 @@ export interface Tunnel {
 // Returns the bore binary path (from PATH or the known local install location),
 // or null if bore is not found.
 async function getBorePath(): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync("which", ["bore"]);
-    const p = stdout.trim();
-    if (p) return p;
-  } catch {}
+  const onPath = await findExecutable("bore");
+  if (onPath) return onPath;
   try {
     await fs.promises.access(BORE_LOCAL_PATH, fs.constants.X_OK);
     return BORE_LOCAL_PATH;
@@ -92,15 +94,49 @@ async function downloadToFile(url: string, dest: string): Promise<void> {
   });
 }
 
-// Node process.arch → bore release target triple prefix
-const ARCH_MAP: Record<string, string> = {
-  x64: "x86_64-unknown-linux-musl",
-  arm64: "aarch64-unknown-linux-musl",
-  arm: "armv7-unknown-linux-musleabihf",
-  ia32: "i686-unknown-linux-musl",
-};
+// Node process.arch → bore release target triple
+const ARCH_MAP: Record<string, string> = IS_WINDOWS
+  ? {
+      x64: "x86_64-pc-windows-msvc",
+      ia32: "i686-pc-windows-msvc",
+      // No native ARM build; Windows on ARM runs the x64 binary under emulation.
+      arm64: "x86_64-pc-windows-msvc",
+    }
+  : {
+      x64: "x86_64-unknown-linux-musl",
+      arm64: "aarch64-unknown-linux-musl",
+      arm: "armv7-unknown-linux-musleabihf",
+      ia32: "i686-unknown-linux-musl",
+    };
 
-async function installBoreLinux(): Promise<void> {
+// Extracts the bore binary from a release archive into destDir.
+async function extractBore(archive: string, destDir: string): Promise<void> {
+  if (!IS_WINDOWS) {
+    // Archive contains a single file named "bore" at root
+    await execFileAsync("tar", ["xzf", archive, "-C", destDir, BORE_BINARY]);
+    return;
+  }
+
+  // Windows releases are .zip. Use the bsdtar bundled with Windows 10+ by full
+  // path (a GNU tar from Git Bash on PATH can't read zip), else PowerShell.
+  const systemTar = path.join(
+    process.env["SystemRoot"] ?? "C:\\Windows",
+    "System32",
+    "tar.exe",
+  );
+  try {
+    await execFileAsync(systemTar, ["-xf", archive, "-C", destDir]);
+  } catch {
+    await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Expand-Archive -LiteralPath $env:BORE_ARCHIVE -DestinationPath $env:BORE_DEST -Force",
+    ], { env: { ...process.env, BORE_ARCHIVE: archive, BORE_DEST: destDir } });
+  }
+}
+
+async function installBoreBinary(): Promise<void> {
   const triple = ARCH_MAP[process.arch];
   if (!triple) {
     throw new Error(
@@ -113,7 +149,7 @@ async function installBoreLinux(): Promise<void> {
     "https://api.github.com/repos/ekzhang/bore/releases/latest",
   )) as { tag_name: string };
   const tag = release.tag_name; // e.g. "v0.6.0"
-  const filename = `bore-${tag}-${triple}.tar.gz`;
+  const filename = `bore-${tag}-${triple}.${IS_WINDOWS ? "zip" : "tar.gz"}`;
   const downloadUrl = `https://github.com/ekzhang/bore/releases/download/${tag}/${filename}`;
 
   const tmpDir = await fs.promises.mkdtemp(
@@ -124,12 +160,11 @@ async function installBoreLinux(): Promise<void> {
   try {
     await downloadToFile(downloadUrl, tarPath);
 
-    // Archive contains a single file named "bore" at root
-    await execFileAsync("tar", ["xzf", tarPath, "-C", tmpDir, "bore"]);
+    await extractBore(tarPath, tmpDir);
 
     const installDir = path.dirname(BORE_LOCAL_PATH);
     await fs.promises.mkdir(installDir, { recursive: true });
-    await fs.promises.copyFile(path.join(tmpDir, "bore"), BORE_LOCAL_PATH);
+    await fs.promises.copyFile(path.join(tmpDir, BORE_BINARY), BORE_LOCAL_PATH);
     await fs.promises.chmod(BORE_LOCAL_PATH, 0o755);
   } finally {
     await fs.promises.rm(tmpDir, { recursive: true, force: true });
@@ -139,10 +174,10 @@ async function installBoreLinux(): Promise<void> {
 export async function installBore(): Promise<void> {
   const spin = p.spinner();
 
-  if (process.platform === "linux") {
+  if (process.platform === "linux" || IS_WINDOWS) {
     spin.start("Downloading bore binary from GitHub...");
     try {
-      await installBoreLinux();
+      await installBoreBinary();
       spin.stop(`bore installed to ${BORE_LOCAL_PATH}`);
       return;
     } catch (err) {
@@ -165,7 +200,7 @@ export async function installBore(): Promise<void> {
     let args: string[];
     let label: string;
     try {
-      await execFileAsync("which", ["brew"]);
+      if (!(await findExecutable("brew"))) throw new Error("brew not found");
       bin = "brew";
       args = ["install", "bore-cli"];
       label = "brew install bore-cli";
