@@ -21,7 +21,7 @@ claude (CLI)                        claude-share
                                       └─ bore tunnel (public URL via bore.pub)
 ```
 
-- The sharer's OAuth token is read from the macOS Keychain and injected per-request inside the MITM proxy — it is never written to disk or sent to the receiver.
+- The sharer's OAuth token is read from the local Claude Code credential store (macOS Keychain, or `~/.claude/.credentials.json` on Linux and Windows) and injected per-request inside the MITM proxy — it is never written to disk or sent to the receiver.
 - The receiver installs a temporary CA cert (valid only for the session) so the MITM can intercept Anthropic traffic. Non-Anthropic domains pass through as an opaque TCP tunnel — never inspected.
 - Pairing uses a one-time code. Once paired, credentials are saved so reconnecting skips the pairing step.
 
@@ -35,6 +35,16 @@ npm install -g @0xpv/claude-share
 
 This installs both `claude-share` and `claude-connect` binaries.
 
+### Platform support
+
+| Platform | Sharer (`claude-share`) | Receiver (`claude-connect`) | bore install (internet sharing) |
+| --- | --- | --- | --- |
+| macOS | ✅ | ✅ | `brew install bore-cli` (or `cargo install bore-cli`) |
+| Linux | ✅ | ✅ | downloaded automatically to `~/.local/bin/bore` |
+| Windows 10+ | ✅ | ✅ | downloaded automatically to `%USERPROFILE%\.local\bin\bore.exe` |
+
+On Windows, run the commands from PowerShell, Command Prompt or Windows Terminal. Claude Code can be installed either natively or through npm.
+
 ---
 
 ## Quickstart
@@ -45,7 +55,7 @@ This installs both `claude-share` and `claude-connect` binaries.
 claude-share
 ```
 
-Requires [bore](https://github.com/ekzhang/bore) for internet sharing (`brew install bore-cli`). If bore is not installed you'll be prompted — decline to share on LAN only.
+Requires [bore](https://github.com/ekzhang/bore) for internet sharing. If bore is not installed you'll be prompted to install it (see [Platform support](#platform-support)) — decline to share on LAN only.
 
 The TUI shows connection URLs. Share the **Public** URL with receivers over the internet, or the **LAN** URL for local network.
 
@@ -104,8 +114,8 @@ The web interface is plain HTTP and shows the connect link, which contains the p
 
 ## Requirements
 
-- **Node.js 18+** on both machines
-- **bore** (`brew install bore-cli`) on the sharer machine for internet sharing
+- **macOS, Linux or Windows 10+** with **Node.js 18+** on both machines
+- **bore** on the sharer machine for internet sharing (`brew install bore-cli` on macOS; downloaded automatically on Linux and Windows when you accept the prompt)
 - The sharer must be logged in to Claude Code (`claude login`)
 - The receiver must have Claude Code installed
 
@@ -113,7 +123,7 @@ The web interface is plain HTTP and shows the connect link, which contains the p
 
 ## Security model
 
-- The sharer's OAuth token is read from the macOS Keychain (or `~/.claude/.credentials.json` on Linux) and injected into requests in-memory. It is never transmitted to the receiver. In Docker it is passed to the share process over IPC and never written to disk.
+- The sharer's OAuth token is read from the macOS Keychain (or `~/.claude/.credentials.json` on Linux and Windows) and injected into requests in-memory. It is never transmitted to the receiver. In Docker it is passed to the share process over IPC and never written to disk.
 - Only these Anthropic endpoints are proxied: `POST /v1/messages`, `GET /v1/models`, `/api/hello`, and OAuth flows on `platform.anthropic.com` / `platform.claude.com`.
 - File upload (`/v1/files`), fine-tuning, and assistants endpoints are blocked.
 - All non-Anthropic HTTPS traffic passes through as an opaque TCP tunnel — the proxy never sees the contents.

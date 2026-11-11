@@ -20,7 +20,7 @@ Build: `bun run build` (compiles both via bun build). Lint: `bun run lint`.
 
 **MITM proxy** (`proxy/mitm.ts`): intercepts TLS only for `INTERCEPT_DOMAINS` (`api.anthropic.com`, `platform.anthropic.com`, `platform.claude.com`, `mcp-proxy.anthropic.com`). All other CONNECT requests are transparent TCP-piped — never touch the cert or plaintext.
 
-**Token injection**: sharer's OAuth token is read from macOS Keychain at startup and injected per-request inside the MITM. Never written to disk, never sent to receiver.
+**Token injection**: sharer's OAuth token is read from the platform credential store (`shared/platforms/`: macOS Keychain, `~/.claude/.credentials.json` on Linux and Windows) at startup and injected per-request inside the MITM. Never written to disk, never sent to receiver.
 
 **Pairing**: connect URL format is `http://<host>/connect/<pairingCode>`. The pairingCode is `base58(32-byte session key)` — it's also the private decryption key. Only the first 5 chars are sent over HTTP for session lookup; the receiver decrypts the response blob locally using the full key from the URL.
 
@@ -45,6 +45,7 @@ Build: `bun run build` (compiles both via bun build). Lint: `bun run lint`.
 
 ## Known quirks
 
+- Windows: never `spawn`/`execFile` a PATH command by bare name — npm-installed tools (`claude`, `npm`, `pnpm`, `yarn`) are `.cmd` shims that need a shell. Use `spawnCommand`/`execCommand`/`findExecutable` from `shared/exec.ts`.
 - `ensureBore()` must run **before** any `p.intro()`/`p.select()` calls. clack's `p.confirm()` tears down stdin in a way ink can't recover from if it runs after other prompts.
 - `--share <url>` and `--share=<url>` are both supported in the receiver.
 - bore doesn't set `x-forwarded-for`, so all bore requests arrive as `ip = "unknown"`.
