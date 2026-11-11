@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 import "@shared/patch-console";
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import tls from "node:tls";
-import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFile);
 
 import * as p from "@clack/prompts";
 import { serve } from "@hono/node-server";
 import { render } from "ink";
 import React from "react";
 
+import { findPidsOnPort, killPids } from "@shared/exec";
 import { platform } from "@shared/platforms";
 import { checkForUpdate, forceUpgrade } from "@shared/checkVersion";
 import { logger } from "./logger";
@@ -416,16 +414,12 @@ async function main() {
       urls.lan = lanUrl;
       p.log.info(`Using port ${PORT} instead.`);
     } else {
-      const { stdout } = await execFileAsync("lsof", [
-        "-ti",
-        `tcp:${PORT}`,
-      ]).catch(() => ({ stdout: "" }));
-      const pids = stdout.trim().split("\n").filter(Boolean);
+      const pids = await findPidsOnPort(PORT);
       if (pids.length === 0) {
         p.log.error(`Could not find process on port ${PORT}.`);
         process.exit(1);
       }
-      await execFileAsync("kill", ["-9", ...pids]);
+      await killPids(pids);
       p.log.info(`Killed process on port ${PORT}, retrying…`);
     }
 
