@@ -1,25 +1,20 @@
-import { execFile } from "node:child_process";
-
 import * as p from "@clack/prompts";
 
+import { execCommand } from "@shared/exec";
 import { platform } from "@shared/platforms";
 import { logger } from "../logger";
 import { initToken } from "./token";
 
-function spawnClaudeForRefresh(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = execFile("claude", ["-p", "HI"], { timeout: 60_000 }, (err) => {
-      if (err?.killed) {
-        reject(new Error("Claude process timed out after 60s"));
-      } else {
-        // Non-zero exit is acceptable — the OAuth refresh can succeed even if the
-        // prompt itself fails (e.g. rate limit, no Pro plan, etc.).
-        resolve();
-      }
-    });
-    child.stdout?.resume();
-    child.stderr?.resume();
-  });
+async function spawnClaudeForRefresh(): Promise<void> {
+  try {
+    await execCommand("claude", ["-p", "HI"], { timeout: 60_000 });
+  } catch (err) {
+    if ((err as { killed?: boolean }).killed) {
+      throw new Error("Claude process timed out after 60s");
+    }
+    // Non-zero exit is acceptable — the OAuth refresh can succeed even if the
+    // prompt itself fails (e.g. rate limit, no Pro plan, etc.).
+  }
 }
 
 export async function verifyTokenOrExit(): Promise<void> {
@@ -27,7 +22,7 @@ export async function verifyTokenOrExit(): Promise<void> {
 
   if (!creds) {
     p.log.error(
-      "Could not read Anthropic credentials from keychain.\n" +
+      "Could not read Anthropic credentials from the credential store.\n" +
         "Please run 'claude' to log in, then restart claude-share.",
     );
     process.exit(1);

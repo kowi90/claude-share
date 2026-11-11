@@ -1,13 +1,10 @@
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import * as p from "@clack/prompts";
 
 import pkg from "../package.json";
-
-const execFileAsync = promisify(execFile);
+import { execCommand, findExecutable } from "./exec";
 
 const CURRENT_VERSION: string = pkg.version;
 const PACKAGE_NAME: string = pkg.name;
@@ -153,10 +150,7 @@ async function detectPackageManager(): Promise<string | null> {
   else if (execPath.includes("yarn")) candidates.unshift("yarn");
 
   for (const pm of new Set(candidates)) {
-    try {
-      await execFileAsync(process.platform === "win32" ? "where" : "which", [pm]);
-      return pm;
-    } catch {}
+    if (await findExecutable(pm)) return pm;
   }
   return null;
 }
@@ -185,7 +179,7 @@ async function attemptUpgrade(): Promise<void> {
   const spin = p.spinner();
   spin.start(`Upgrading via ${pm}…`);
   try {
-    await execFileAsync(cmd, args, { timeout: 90_000 });
+    await execCommand(cmd, args, { timeout: 90_000 });
     spin.stop("Upgraded successfully. Please restart the CLI.");
     process.exit(0);
   } catch (err) {

@@ -1,17 +1,14 @@
-import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 
 import * as p from "@clack/prompts";
 
+import { findExecutable, spawnCommand } from "@shared/exec";
 import { platform } from "@shared/platforms";
 import { apiFetch } from "./fetch";
 import { logger } from "./logger";
 import type { SharerAccount } from "./types";
-
-const execFileAsync = promisify(execFile);
 
 // ── Onboarding ────────────────────────────────────────────────────────────────
 
@@ -75,10 +72,7 @@ export async function ensureCredentials() {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 export async function checkClaudeInstalled(): Promise<boolean> {
-  const which = process.platform === "win32" ? "where" : "which";
-  return execFileAsync(which, ["claude"])
-    .then(() => true)
-    .catch(() => false);
+  return (await findExecutable("claude")) !== null;
 }
 
 export async function sessionPost(
@@ -187,7 +181,7 @@ export async function launchClaude(
   parsedProxy.password = encodeURIComponent(meta.proxyPass);
   const httpProxyUrl = parsedProxy.toString();
 
-  const child = spawn("claude", claudeArgs, {
+  const child = await spawnCommand("claude", claudeArgs, {
     stdio: "inherit",
     env: {
       ...process.env,
@@ -246,6 +240,10 @@ export async function launchClaude(
     process.exit(1);
   });
 
-  process.on("SIGINT", () => child.kill("SIGINT"));
+  // On Windows Ctrl+C already reaches the child through the shared console, and
+  // child.kill() there is a hard kill — so just keep ourselves alive for cleanup.
+  process.on("SIGINT", () => {
+    if (process.platform !== "win32") child.kill("SIGINT");
+  });
   process.on("SIGTERM", () => child.kill("SIGTERM"));
 }
