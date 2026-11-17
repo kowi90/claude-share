@@ -8,7 +8,9 @@ const borePassword = process.env.BORE_PASSWORD || "";
 function build(entry: string, outfile: string, extraArgs: string[] = []) {
   const result = Bun.spawnSync(
     [
-      "bun", "build", entry,
+      // Use the running bun binary rather than "bun" from PATH: on Windows that can be an
+      // npm .cmd shim, which rejects args containing quotes (the --define values below).
+      process.execPath, "build", entry,
       "--outfile", outfile,
       "--target", "node",
       "--production",
