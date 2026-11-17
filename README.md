@@ -35,6 +35,44 @@ npm install -g @0xpv/claude-share
 
 This installs both `claude-share` and `claude-connect` binaries.
 
+### Install this fork (from source)
+
+The fork at [kowi90/claude-share](https://github.com/kowi90/claude-share) isn't published to npm, so build it from source. You need [Node.js](https://nodejs.org) 18+, [git](https://git-scm.com) and [Bun](https://bun.sh) (Bun is only used for the build step).
+
+Install Bun if you don't have it:
+
+```bash
+# macOS / Linux
+curl -fsSL https://bun.sh/install | bash
+
+# Windows (PowerShell)
+powershell -c "irm bun.sh/install.ps1 | iex"
+```
+
+Then clone, build and install globally (same commands on macOS, Linux and Windows):
+
+```bash
+git clone https://github.com/kowi90/claude-share.git
+cd claude-share
+bun install
+bun run build
+npm install -g .
+```
+
+This puts `claude-share` and `claude-connect` on your PATH, just like the npm package. npm links the global install to this folder, so don't delete or move it. If you already have `@0xpv/claude-share` installed, uninstall it first (`npm uninstall -g @0xpv/claude-share`) so the two don't conflict.
+
+To update later:
+
+```bash
+cd claude-share
+git pull
+bun install
+bun run build
+npm install -g .
+```
+
+To uninstall: `npm uninstall -g @0xpv/claude-share`.
+
 ### Platform support
 
 | Platform | Sharer (`claude-share`) | Receiver (`claude-connect`) | bore install (internet sharing) |
