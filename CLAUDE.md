@@ -41,7 +41,7 @@ Build: `bun run build` (compiles both via bun build). Lint: `bun run lint`.
 
 ## Manager (Docker)
 
-`manager/index.ts` is a Hono web app (`dist/manager/index.js`, `Dockerfile`, `docker-compose.yml`) that spawns one `claude-share --headless --accept-terms --port=N --duration-ms=X` child per share. `claude-share/headless.ts` holds the IPC protocol: the parent sends `init` (credentials), `regenerate` and `stop`; the child sends `status` every second and `fatal`. Credentials come over IPC via `setPlatformOverride()`, never argv, env or disk. The child exits when the IPC channel disconnects. `ADVERTISE_HOST` replaces the auto-detected LAN IP for both the URLs and the cert SAN (IP or DNS).
+`manager/index.ts` is a Hono web app (`dist/manager/index.js`, `Dockerfile`, `docker-compose.yml`) that runs a single always-on share of the token in `CLAUDE_TOKEN`/`CLAUDE_TOKEN_FILE`: it spawns one `claude-share --headless --accept-terms --port=N --duration-ms=<until token expiry>` child and restarts it on crash (not after "stop" or token expiry). The web page (`/api/share*`, gated by `MANAGER_PASSWORD`) is the same for every viewer: status, pairing link, "new pairing link" (regenerate) and paired devices. Nothing is stored in the browser except the remembered password. `claude-share/headless.ts` holds the IPC protocol: the parent sends `init` (credentials), `regenerate`, `unpair` (removes a machine and drops its open MITM tunnels) and `stop`; the child sends `status` every second and `fatal`. Credentials come over IPC via `setPlatformOverride()`, never argv, env or disk. The child exits when the IPC channel disconnects. `ADVERTISE_HOST` replaces the auto-detected LAN IP for both the URLs and the cert SAN (IP or DNS).
 
 ## Known quirks
 

@@ -30,6 +30,7 @@ export interface HeadlessStatus {
 export type ParentMessage =
   | { type: "init"; credentials: OAuthCredentials; systemName?: string }
   | { type: "regenerate" }
+  | { type: "unpair"; machineId: string }
   | { type: "stop" };
 
 export type ChildMessage =
@@ -121,6 +122,7 @@ export async function receiveInit(): Promise<{ systemName?: string }> {
 export function startHeadlessReporting(
   getStatus: () => Omit<HeadlessStatus, "pairingCode" | "pairingCodeUsed" | "machines">,
   onStop: () => void,
+  onUnpair: (machineId: string) => void,
 ): void {
   const report = () => {
     const session = getSession();
@@ -157,6 +159,9 @@ export function startHeadlessReporting(
     if (msg?.type === "regenerate") {
       const session = getSession();
       if (session) regeneratePairingCode(session);
+      report();
+    } else if (msg?.type === "unpair" && typeof msg.machineId === "string") {
+      onUnpair(msg.machineId);
       report();
     } else if (msg?.type === "stop") {
       logger.info("stop requested by manager");

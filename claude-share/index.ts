@@ -60,6 +60,8 @@ import {
   isSessionExpired,
   getSession,
   checkMachineAuth,
+  machineAuthHeader,
+  removeMachine,
   type SharerAccount,
 } from "./session/manager";
 import { App } from "./tui/App";
@@ -164,7 +166,8 @@ interface SetupResult {
   systemName?: string;
 }
 
-const MAX_HEADLESS_DURATION = 7 * 24 * 60 * 60 * 1000;
+// Long enough for an always-on server share; the manager restarts it on expiry
+const MAX_HEADLESS_DURATION = 365 * 24 * 60 * 60 * 1000;
 
 /** Non-interactive setup: options come from flags, credentials from IPC. */
 async function headlessSetup(): Promise<SetupResult> {
@@ -174,7 +177,7 @@ async function headlessSetup(): Promise<SetupResult> {
 
   const duration = parseInt(flagValue("--duration-ms") ?? "", 10);
   if (!Number.isFinite(duration) || duration <= 0 || duration > MAX_HEADLESS_DURATION) {
-    return headlessFail("--duration-ms must be between 1 and 604800000 (1 week)");
+    return headlessFail(`--duration-ms must be between 1 and ${MAX_HEADLESS_DURATION} (1 year)`);
   }
 
   const { systemName } = await receiveInit();
@@ -516,6 +519,12 @@ async function main() {
       () => {
         cleanup();
         process.exit(0);
+      },
+      (machineId) => {
+        const machine = removeMachine(session, machineId);
+        if (!machine) return;
+        mitmProxy.dropConnections(machineAuthHeader(machine));
+        logger.info(`machine ${machine.name} unpaired by manager`);
       },
     );
   } else {

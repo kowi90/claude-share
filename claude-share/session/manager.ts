@@ -121,13 +121,25 @@ export function addMachine(session: Session, name: string): Machine {
   return machine;
 }
 
+/** The Proxy-Authorization header value a machine authenticates with. */
+export function machineAuthHeader(machine: Machine): string {
+  return "Basic " + Buffer.from(`${machine.id}:${machine.proxyPass}`).toString("base64");
+}
+
 /** Returns true if the Proxy-Authorization header matches any active machine. */
 export function checkMachineAuth(session: Session, authHeader: string): boolean {
   for (const machine of session.machines.values()) {
-    const expected = "Basic " + Buffer.from(`${machine.id}:${machine.proxyPass}`).toString("base64");
-    if (authHeader === expected) return true;
+    if (authHeader === machineAuthHeader(machine)) return true;
   }
   return false;
+}
+
+/** Unpairs a machine: its proxy credentials stop working. Returns the removed machine. */
+export function removeMachine(session: Session, machineId: string): Machine | null {
+  const machine = session.machines.get(machineId);
+  if (!machine) return null;
+  session.machines.delete(machineId);
+  return machine;
 }
 
 export function addMachineSession(session: Session, machineId: string): MachineSession | null {

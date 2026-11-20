@@ -65,6 +65,8 @@ export interface MitmProxy {
   caCertPem: string;
   /** TLS server cert for the API port, signed by the MITM CA */
   serverCert: ServerCert;
+  /** Closes every open tunnel that was authorized with this Proxy-Authorization value */
+  dropConnections(authHeader: string): void;
   close(): void;
 }
 
@@ -85,6 +87,18 @@ export async function createMitmProxy(
     let proxyPort = 0;
     let proxyReady = false;
     const pendingSockets: net.Socket[] = [];
+    // Auth is only checked on CONNECT, so open tunnels are tracked to be able
+    // to cut them off when a machine is unpaired
+    const tunnelsByAuth = new Map<string, Set<net.Socket>>();
+    const trackTunnel = (auth: string, socket: net.Socket) => {
+      let set = tunnelsByAuth.get(auth);
+      if (!set) tunnelsByAuth.set(auth, (set = new Set()));
+      set.add(socket);
+      socket.once("close", () => {
+        set.delete(socket);
+        if (!set.size && tunnelsByAuth.get(auth) === set) tunnelsByAuth.delete(auth);
+      });
+    };
 
     const proxy = new Proxy();
     proxy.use(Proxy.gunzip);
@@ -234,6 +248,7 @@ export async function createMitmProxy(
           socket.destroy();
           return;
         }
+        trackTunnel(connectAuth, socket);
 
         const [hostname, portStr] = ((req.url as string) ?? "").split(":");
         if (INTERCEPT_DOMAINS.has(hostname)) {
@@ -290,6 +305,11 @@ export async function createMitmProxy(
               } else {
                 pendingSockets.push(socket);
               }
+            },
+            dropConnections(authHeader) {
+              const set = tunnelsByAuth.get(authHeader);
+              tunnelsByAuth.delete(authHeader);
+              for (const s of set ?? []) s.destroy();
             },
             close() {
               proxy.close();

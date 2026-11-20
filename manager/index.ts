@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// claude-share manager: a small web app that lets people start their own
-// claude-share instance on this server. Each instance is a separate
-// `claude-share --headless` child process with its own public port, driven
-// over the Node IPC channel.
+// claude-share manager: runs one always-on share of the Claude token configured
+// on this server (CLAUDE_TOKEN / CLAUDE_TOKEN_FILE) and serves a web page where
+// anyone with the manager password can see it, see which paired devices are
+// online and request a fresh pairing link. The share is a separate
+// `claude-share --headless` child process driven over the Node IPC channel.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
@@ -63,22 +64,28 @@ log(`manager starting (node ${process.version}), logs in ${LOG_DIR}`);
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const MANAGER_PORT = parseInt(process.env.MANAGER_PORT ?? "8080", 10);
-const PORT_START = parseInt(process.env.SHARE_PORT_START ?? "2586", 10);
-const PORT_END = parseInt(process.env.SHARE_PORT_END ?? String(PORT_START + 9), 10);
+const SHARE_PORT = parseInt(process.env.SHARE_PORT ?? process.env.SHARE_PORT_START ?? "2586", 10);
 const ADVERTISE_HOST = process.env.ADVERTISE_HOST?.trim() || null;
 const MANAGER_PASSWORD = process.env.MANAGER_PASSWORD ?? "";
-const TUNNEL_ENABLED = process.env.TUNNEL !== "0" && process.env.TUNNEL !== "false";
+const TUNNEL_ENABLED = process.env.TUNNEL === "1" || process.env.TUNNEL === "true";
+const SHARE_NAME = process.env.SHARE_NAME?.trim().slice(0, 64) || "claude-share";
 
-const DURATIONS_H = [6, 24, 168] as const;
 const SETUP_TOKEN_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
+const MAX_DURATION_MS = 365 * 24 * 60 * 60 * 1000;
 
-if (!Number.isInteger(PORT_START) || !Number.isInteger(PORT_END) || PORT_END < PORT_START) {
-  die(`SHARE_PORT_START / SHARE_PORT_END are invalid (${process.env.SHARE_PORT_START}-${process.env.SHARE_PORT_END})`);
+if (!Number.isInteger(SHARE_PORT) || SHARE_PORT < 1 || SHARE_PORT > 65534) {
+  die(`SHARE_PORT is invalid (${process.env.SHARE_PORT ?? process.env.SHARE_PORT_START})`);
 }
 if (!ADVERTISE_HOST) {
   logError(
     "warning: ADVERTISE_HOST is not set — connect links will use the container's " +
       "internal IP and won't be reachable from other machines.",
+  );
+}
+if (!MANAGER_PASSWORD) {
+  logError(
+    "warning: MANAGER_PASSWORD is not set — anyone who can reach the web page " +
+      "can get a pairing link and use the shared subscription.",
   );
 }
 
@@ -89,41 +96,7 @@ const SHARE_ENTRY = [
 ].find((f) => fs.existsSync(f));
 if (!SHARE_ENTRY) die(`could not find the claude-share entry point next to ${here}`);
 
-// ── Instances ───────────────────────────────────────────────────────────────
-
-type InstanceState = "starting" | "running" | "stopped" | "failed";
-
-interface Instance {
-  id: string;
-  ownerKeyHash: Buffer;
-  name: string;
-  port: number;
-  tunnel: boolean;
-  createdAt: Date;
-  tokenExpiresAt: number;
-  state: InstanceState;
-  error: string | null;
-  status: HeadlessStatus | null;
-  child: ChildProcess | null;
-}
-
-const instances = new Map<string, Instance>();
-
-const sha256 = (s: string) => crypto.createHash("sha256").update(s).digest();
-
-function safeEqual(a: string, b: string): boolean {
-  return crypto.timingSafeEqual(sha256(a), sha256(b));
-}
-
-function allocatePort(): number | null {
-  const used = new Set(
-    [...instances.values()].filter((i) => i.child).map((i) => i.port),
-  );
-  for (let port = PORT_START; port <= PORT_END; port++) {
-    if (!used.has(port)) return port;
-  }
-  return null;
-}
+// ── Credentials ─────────────────────────────────────────────────────────────
 
 // OAuth tokens are URL-safe base64-ish; anything else would be rejected by
 // Node as an HTTP header value and crash the share on its first request
@@ -156,14 +129,14 @@ function parseCredentials(input: string): OAuthCredentials | { error: string } {
         rateLimitTier: c.rateLimitTier,
       };
     } catch {
-      return { error: "Credentials are not valid JSON" };
+      return { error: "credentials are not valid JSON" };
     }
   }
   // A long token copied from a terminal often has line breaks where it wrapped
   const token = raw.replace(/\s+/g, "");
   if (token.startsWith("sk-ant-oat")) {
     if (!TOKEN_RE.test(token)) {
-      return { error: "The token contains invalid characters — paste only the sk-ant-oat… token" };
+      return { error: "the token contains invalid characters — use only the sk-ant-oat… token" };
     }
     return {
       accessToken: token,
@@ -176,33 +149,104 @@ function parseCredentials(input: string): OAuthCredentials | { error: string } {
   if (token.startsWith("sk-ant-api")) {
     return { error: "API keys are not supported — use a token from `claude setup-token`" };
   }
-  return { error: "Unrecognised token — paste the output of `claude setup-token`" };
+  return { error: "unrecognised token — use the output of `claude setup-token`" };
 }
 
-function startInstance(
-  inst: Instance,
-  credentials: OAuthCredentials,
-  durationMs: number,
-): void {
+/** Reads the token from CLAUDE_TOKEN or the file in CLAUDE_TOKEN_FILE (Docker secrets). */
+function loadCredentials(): OAuthCredentials {
+  let raw = process.env.CLAUDE_TOKEN ?? "";
+  const file = process.env.CLAUDE_TOKEN_FILE;
+  if (!raw.trim() && file) {
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch (err) {
+      die(`could not read CLAUDE_TOKEN_FILE ${file}: ${(err as Error).message}`);
+    }
+  }
+  // Keep the token out of the environment so it never reaches a child process
+  delete process.env.CLAUDE_TOKEN;
+  if (!raw.trim()) {
+    die("no Claude token configured — set CLAUDE_TOKEN (or CLAUDE_TOKEN_FILE) to the output of `claude setup-token`");
+  }
+  const creds = parseCredentials(raw);
+  if ("error" in creds) die(`CLAUDE_TOKEN: ${creds.error}`);
+  if (creds.expiresAt <= Date.now()) die("CLAUDE_TOKEN has already expired");
+  return creds;
+}
+
+const credentials = loadCredentials();
+
+// ── Share process ───────────────────────────────────────────────────────────
+
+type ShareState = "starting" | "running" | "restarting" | "stopped" | "expired" | "failed";
+
+const share = {
+  state: "starting" as ShareState,
+  error: null as string | null,
+  status: null as HeadlessStatus | null,
+  child: null as ChildProcess | null,
+  startedAt: new Date(),
+  restartAt: null as Date | null,
+};
+
+const label = `share :${SHARE_PORT}`;
+let restartTimer: NodeJS.Timeout | null = null;
+let failures = 0;
+let shuttingDown = false;
+/** Set by "Stop share": the share stays down until started again */
+let stopRequested = false;
+
+const tokenExpired = () => credentials.expiresAt <= Date.now();
+
+function markExpired(): void {
+  share.state = "expired";
+  share.error = "The Claude token has expired — set a new CLAUDE_TOKEN and restart the container.";
+  share.restartAt = null;
+  logError(`${label} not restarting: token expired`);
+}
+
+function scheduleRestart(delayMs: number): void {
+  if (shuttingDown || stopRequested) return;
+  if (tokenExpired()) return markExpired();
+  share.restartAt = new Date(Date.now() + delayMs);
+  if (restartTimer) clearTimeout(restartTimer);
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    startShare();
+  }, delayMs);
+}
+
+function startShare(): void {
+  if (tokenExpired()) return markExpired();
+  stopRequested = false;
+  // The share lives exactly as long as the token; devices are removed by hand
+  const durationMs = Math.min(credentials.expiresAt - Date.now(), MAX_DURATION_MS);
   const args = [
     SHARE_ENTRY!,
     "--headless",
     "--accept-terms",
-    `--port=${inst.port}`,
-    `--duration-ms=${durationMs}`,
+    `--port=${SHARE_PORT}`,
+    `--duration-ms=${Math.max(1, Math.floor(durationMs))}`,
   ];
-  if (inst.tunnel) args.push("--tunnel");
+  if (TUNNEL_ENABLED) args.push("--tunnel");
 
   const env = { ...process.env };
   delete env.MANAGER_PASSWORD;
+  delete env.CLAUDE_TOKEN;
+  delete env.CLAUDE_TOKEN_FILE;
+
+  share.state = "starting";
+  share.error = null;
+  share.status = null;
+  share.startedAt = new Date();
+  share.restartAt = null;
 
   const child = spawn(process.execPath, args, {
     stdio: ["ignore", "ignore", "pipe", "ipc"],
     env,
   });
-  inst.child = child;
-  const label = `instance ${inst.id.slice(0, 8)} :${inst.port}`;
-  log(`${label} spawned (pid ${child.pid}, tunnel=${inst.tunnel}, duration=${durationMs}ms)`);
+  share.child = child;
+  log(`${label} spawned (pid ${child.pid}, tunnel=${TUNNEL_ENABLED}, duration=${durationMs}ms)`);
 
   child.on("error", (err) => logError(`${label} process error`, err));
 
@@ -222,28 +266,44 @@ function startInstance(
   });
 
   child.on("message", (msg: ChildMessage) => {
+    if (share.child !== child) return;
     if (msg?.type === "status") {
-      inst.status = msg.status;
-      if (inst.state === "starting") {
-        inst.state = "running";
+      share.status = msg.status;
+      if (share.state === "starting") {
+        share.state = "running";
         log(`${label} running`);
       }
     } else if (msg?.type === "fatal") {
-      inst.error = msg.message;
+      share.error = msg.message;
       logError(`${label} reported fatal error: ${msg.message}`);
     }
   });
 
   child.on("exit", (code, signal) => {
-    inst.child = null;
+    if (share.child !== child) return;
+    share.child = null;
+    share.status = null;
     const how = signal ? `killed by ${signal}` : `exited with code ${code}`;
-    if (code === 0) {
-      inst.state = "stopped";
-      log(`${label} ${how}`);
+    if (shuttingDown) return;
+    if (stopRequested) {
+      share.state = "stopped";
+      share.error = null;
+      log(`${label} ${how}, stopped on request`);
+    } else if (code === 0) {
+      // Session ran out (token expiry) or a restart was requested
+      log(`${label} ${how}, starting a new session`);
+      failures = 0;
+      share.state = "restarting";
+      scheduleRestart(1000);
     } else {
-      inst.state = "failed";
-      inst.error ??= stderrTail.trim().split("\n").pop() || how;
-      logError(`${label} ${how}: ${inst.error} (see share-*.log for details)`);
+      share.error ??= stderrTail.trim().split("\n").pop() || how;
+      // Reset the backoff if it had been running for a while
+      if (Date.now() - share.startedAt.getTime() > 5 * 60_000) failures = 0;
+      failures++;
+      const delay = Math.min(5000 * 2 ** (failures - 1), 5 * 60_000);
+      share.state = "failed";
+      logError(`${label} ${how}: ${share.error} (see share-*.log), retrying in ${delay / 1000}s`);
+      scheduleRestart(delay);
     }
   });
 
@@ -251,33 +311,33 @@ function startInstance(
   child.send({
     type: "init",
     credentials,
-    systemName: inst.name,
+    systemName: SHARE_NAME,
   } satisfies ParentMessage);
 }
 
-function sendToChild(inst: Instance, msg: ParentMessage): void {
-  if (inst.child?.connected) inst.child.send(msg);
+function sendToChild(msg: ParentMessage): void {
+  if (share.child?.connected) share.child.send(msg);
 }
 
 function connectUrl(base: string | null, code: string): string | null {
   return base ? `claudeshare://${base.replace(/^https?:\/\//, "")}/connect/${code}` : null;
 }
 
-function serialize(inst: Instance) {
-  const s = inst.status;
-  const live = inst.state === "running" && s;
+function serialize() {
+  const s = share.status;
+  const live = share.state === "running" && s;
   // The connect link embeds the pairing code (the session's private key). It is
-  // only handed to the instance owner, and only while the code is still unused.
+  // only shown behind the manager password, and only while still unused.
   const showLink = live && !s.pairingCodeUsed;
   return {
-    id: inst.id,
-    name: inst.name,
-    state: inst.state,
-    error: inst.error,
-    port: inst.port,
-    tunnel: inst.tunnel,
-    createdAt: inst.createdAt.toISOString(),
-    tokenExpiresAt: new Date(inst.tokenExpiresAt).toISOString(),
+    name: SHARE_NAME,
+    state: share.state,
+    error: share.error,
+    port: SHARE_PORT,
+    tunnel: TUNNEL_ENABLED,
+    startedAt: share.startedAt.toISOString(),
+    restartAt: share.restartAt?.toISOString() ?? null,
+    tokenExpiresAt: new Date(credentials.expiresAt).toISOString(),
     sharedUntil: s?.sharedUntil ?? null,
     tunnelDown: s?.tunnelDown ?? false,
     pairingCodeUsed: s?.pairingCodeUsed ?? false,
@@ -297,123 +357,91 @@ app.use("/api/*", bodyLimit({ maxSize: 64 * 1024 }));
 
 app.get("/", (c) => c.html(uiHtml));
 
-app.get("/api/config", (c) =>
-  c.json({
-    passwordRequired: MANAGER_PASSWORD !== "",
-    tunnelAvailable: TUNNEL_ENABLED,
-    advertiseHost: ADVERTISE_HOST,
-    durationsHours: DURATIONS_H,
-    freeSlots: PORT_END - PORT_START + 1 -
-      [...instances.values()].filter((i) => i.child).length,
-  }),
-);
+// Not gated: tells the page whether to ask for a password
+app.get("/api/config", (c) => c.json({ passwordRequired: MANAGER_PASSWORD !== "" }));
 
-app.post("/api/instances", async (c) => {
-  if (MANAGER_PASSWORD && !safeEqual(c.req.header("x-manager-password") ?? "", MANAGER_PASSWORD)) {
+const sha256 = (s: string) => crypto.createHash("sha256").update(s).digest();
+const safeEqual = (a: string, b: string) => crypto.timingSafeEqual(sha256(a), sha256(b));
+
+// Slows down password guessing: after too many wrong attempts in a minute,
+// everyone is locked out until the window passes.
+const MAX_FAILURES_PER_MINUTE = 10;
+let failureWindowStart = 0;
+let failureCount = 0;
+
+app.use("/api/share/*", async (c, next) => {
+  if (!MANAGER_PASSWORD) return next();
+  const now = Date.now();
+  if (now - failureWindowStart > 60_000) {
+    failureWindowStart = now;
+    failureCount = 0;
+  }
+  if (failureCount >= MAX_FAILURES_PER_MINUTE) {
+    return c.json({ error: "Too many wrong passwords — try again in a minute" }, 429);
+  }
+  if (!safeEqual(c.req.header("x-manager-password") ?? "", MANAGER_PASSWORD)) {
+    failureCount++;
+    if (failureCount === MAX_FAILURES_PER_MINUTE) logError("too many wrong manager passwords, locking for a minute");
     return c.json({ error: "Wrong manager password" }, 401);
   }
-
-  const body = await c.req
-    .json<{
-      name?: string;
-      token?: string;
-      durationHours?: number;
-      tunnel?: boolean;
-      acceptTerms?: boolean;
-    }>()
-    .catch(() => null);
-  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
-
-  if (body.acceptTerms !== true) {
-    return c.json({ error: "You must accept the terms" }, 400);
-  }
-  const name = (body.name ?? "").trim().slice(0, 64);
-  if (!name) return c.json({ error: "Name is required" }, 400);
-  const hours = body.durationHours as (typeof DURATIONS_H)[number];
-  if (!DURATIONS_H.includes(hours)) {
-    return c.json({ error: "Invalid duration" }, 400);
-  }
-
-  const creds = parseCredentials(body.token ?? "");
-  if ("error" in creds) {
-    log(`share request rejected: ${creds.error}`);
-    return c.json({ error: creds.error }, 400);
-  }
-  if (creds.expiresAt <= Date.now()) {
-    return c.json({ error: "This token has already expired" }, 400);
-  }
-
-  const port = allocatePort();
-  if (port === null) {
-    log("share request rejected: no free ports");
-    return c.json({ error: "No free ports — all share slots are in use" }, 503);
-  }
-
-  const ownerKey = crypto.randomBytes(32).toString("base64url");
-  const inst: Instance = {
-    id: crypto.randomUUID(),
-    ownerKeyHash: sha256(ownerKey),
-    name,
-    port,
-    tunnel: TUNNEL_ENABLED && body.tunnel === true,
-    createdAt: new Date(),
-    tokenExpiresAt: creds.expiresAt,
-    state: "starting",
-    error: null,
-    status: null,
-    child: null,
-  };
-  instances.set(inst.id, inst);
-  startInstance(inst, creds, hours * 60 * 60 * 1000);
-
-  return c.json({ id: inst.id, ownerKey }, 201);
+  return next();
 });
 
-// Every per-instance route requires the owner key returned at creation.
-// Unknown id and wrong key look identical so ids can't be probed.
-function ownedInstance(id: string, key: string | undefined): Instance | null {
-  const inst = instances.get(id);
-  if (!inst || !crypto.timingSafeEqual(sha256(key ?? ""), inst.ownerKeyHash)) return null;
-  return inst;
+app.get("/api/share", (c) => c.json(serialize()));
+
+app.post("/api/share/regenerate", (c) => {
+  if (share.state !== "running") return c.json({ error: "The share is not running" }, 409);
+  log(`${label} new pairing link requested`);
+  sendToChild({ type: "regenerate" });
+  return c.json({ ok: true });
+});
+
+app.post("/api/share/machines/:id/remove", (c) => {
+  if (share.state !== "running") return c.json({ error: "The share is not running" }, 409);
+  const id = c.req.param("id");
+  const machine = share.status?.machines.find((m) => m.id === id);
+  if (!machine) return c.json({ error: "No such device" }, 404);
+  log(`${label} removing device "${machine.name}"`);
+  sendToChild({ type: "unpair", machineId: id });
+  // Drop it from the cached status right away so the page updates immediately
+  share.status!.machines = share.status!.machines.filter((m) => m.id !== id);
+  return c.json({ ok: true });
+});
+
+function stopChild(): void {
+  const child = share.child;
+  if (!child) return;
+  sendToChild({ type: "stop" });
+  setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 5000).unref();
 }
-const NOT_FOUND = { error: "Not found" } as const;
 
-app.get("/api/instances/:id", (c) => {
-  const inst = ownedInstance(c.req.param("id"), c.req.header("x-owner-key"));
-  return inst ? c.json(serialize(inst)) : c.json(NOT_FOUND, 404);
-});
-
-app.post("/api/instances/:id/regenerate", (c) => {
-  const inst = ownedInstance(c.req.param("id"), c.req.header("x-owner-key"));
-  if (!inst) return c.json(NOT_FOUND, 404);
-  if (inst.state !== "running") return c.json({ error: "Instance is not running" }, 409);
-  sendToChild(inst, { type: "regenerate" });
+// Stops the share and keeps it down. All pairings are lost.
+app.post("/api/share/stop", (c) => {
+  log(`${label} stop requested`);
+  stopRequested = true;
+  if (restartTimer) clearTimeout(restartTimer);
+  restartTimer = null;
+  share.restartAt = null;
+  if (share.child) stopChild();
+  else share.state = "stopped";
   return c.json({ ok: true });
 });
 
-app.post("/api/instances/:id/stop", (c) => {
-  const inst = ownedInstance(c.req.param("id"), c.req.header("x-owner-key"));
-  if (!inst) return c.json(NOT_FOUND, 404);
-  log(`instance ${inst.id.slice(0, 8)} :${inst.port} stop requested`);
-  sendToChild(inst, { type: "stop" });
-  return c.json({ ok: true });
-});
-
-app.delete("/api/instances/:id", (c) => {
-  const inst = ownedInstance(c.req.param("id"), c.req.header("x-owner-key"));
-  if (!inst) return c.json(NOT_FOUND, 404);
-  log(`instance ${inst.id.slice(0, 8)} :${inst.port} deleted`);
-  sendToChild(inst, { type: "stop" });
-  const child = inst.child;
-  if (child) setTimeout(() => child.kill("SIGKILL"), 5000).unref();
-  instances.delete(inst.id);
+app.post("/api/share/start", (c) => {
+  if (share.child) return c.json({ error: "The share is already running" }, 409);
+  if (tokenExpired()) return c.json({ error: "The Claude token has expired" }, 409);
+  log(`${label} start requested`);
+  failures = 0;
+  if (restartTimer) clearTimeout(restartTimer);
+  restartTimer = null;
+  startShare();
   return c.json({ ok: true });
 });
 
 const server = serve({ fetch: app.fetch, port: MANAGER_PORT, hostname: "0.0.0.0" }, () => {
   log(`claude-share manager listening on :${MANAGER_PORT}`);
-  log(`share ports ${PORT_START}-${PORT_END}, advertised as ${ADVERTISE_HOST ?? "(auto)"}${ADVERTISE_HOST && !isIP(ADVERTISE_HOST) ? " (hostname)" : ""}`);
-  if (!MANAGER_PASSWORD) log("MANAGER_PASSWORD is not set — anyone who can reach this page can create shares");
+  log(`share "${SHARE_NAME}" on port ${SHARE_PORT}, advertised as ${ADVERTISE_HOST ?? "(auto)"}${ADVERTISE_HOST && !isIP(ADVERTISE_HOST) ? " (hostname)" : ""}`);
+  startShare();
 });
 
 server.on("error", (err) => {
@@ -422,8 +450,10 @@ server.on("error", (err) => {
 });
 
 function shutdown(signal: string) {
-  log(`received ${signal}, stopping ${instances.size} instance(s)`);
-  for (const inst of instances.values()) sendToChild(inst, { type: "stop" });
+  log(`received ${signal}, stopping the share`);
+  shuttingDown = true;
+  if (restartTimer) clearTimeout(restartTimer);
+  sendToChild({ type: "stop" });
   setTimeout(() => process.exit(0), 1500).unref();
 }
 process.on("SIGINT", () => shutdown("SIGINT"));

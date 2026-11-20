@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>claude-share manager</title>
+<title>claude-share</title>
 <style>
   :root {
     --bg: #f6f5f1; --surface: #ffffff; --text: #1d1c1a; --muted: #6d6a63;
@@ -63,7 +63,11 @@
   .meta { color: var(--muted); font-size: 13px; }
   .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; border: 1px solid currentColor; }
   .s-running { color: var(--ok); } .s-starting { color: var(--warn); }
-  .s-stopped { color: var(--muted); } .s-failed, .s-gone { color: var(--bad); }
+  .s-restarting { color: var(--warn); } .s-failed { color: var(--bad); }
+  .state { font-size: 12px; font-weight: 600; }
+  .state.on { color: var(--ok); } .state.off { color: var(--muted); }
+  .s-stopped { color: var(--muted); } .s-expired { color: var(--bad); }
+  button.small { padding: 2px 8px; font-size: 12px; margin-left: auto; }
   .link { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
   .link span { font-size: 12px; color: var(--muted); width: 48px; flex: none; }
   .link input { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
@@ -77,81 +81,40 @@
 <body>
 <main>
   <header>
-    <h1>claude-share manager</h1>
-    <p class="sub">Start a share of your Claude Code subscription on this server, then send the connect link to a friend.</p>
+    <h1 id="title">claude-share</h1>
+    <p class="sub">Pair a device with the Claude subscription shared from this server.</p>
   </header>
 
-  <section class="card">
-    <h2>New share</h2>
-    <form id="create" autocomplete="off">
-      <label for="name">Name</label>
-      <input id="name" type="text" maxlength="64" required placeholder="e.g. Alex's Claude">
-      <p class="hint">Shown to people who connect.</p>
-
-      <label for="token">Claude token</label>
-      <textarea id="token" required spellcheck="false" placeholder="sk-ant-oat01-…"></textarea>
-      <p class="hint">Run <code>claude setup-token</code> on your own machine and paste the token it prints. It is passed to your share process in memory only and is never stored on disk.</p>
-
-      <div class="row">
-        <div>
-          <label for="duration">Share for</label>
-          <select id="duration">
-            <option value="6">6 hours</option>
-            <option value="24" selected>24 hours</option>
-            <option value="168">1 week</option>
-          </select>
-        </div>
-        <div id="password-wrap" hidden>
-          <label for="password">Manager password</label>
-          <input id="password" type="password">
-        </div>
-      </div>
-
-      <label class="check" id="tunnel-wrap" hidden>
-        <input id="tunnel" type="checkbox">
-        <span>Also expose over the internet via a bore tunnel <span class="hint">(experimental)</span></span>
-      </label>
-
-      <div class="terms">
-        You share your Claude Code subscription at your own risk. This is an open-source project and its
-        authors are not liable for any damage or suspension of your subscription. Only share with people you
-        trust — sharing with many people is a direct route to an account ban.
-      </div>
-      <label class="check">
-        <input id="terms" type="checkbox" required>
-        <span>I understand and want to continue</span>
-      </label>
-
+  <section class="card" id="login" hidden>
+    <h2>Manager password</h2>
+    <form id="login-form" autocomplete="on">
+      <input id="password" type="password" autocomplete="current-password" required>
       <div class="actions">
-        <button class="primary" type="submit" id="submit">Start share</button>
-        <span class="error" id="create-error" role="alert"></span>
+        <button class="primary" type="submit">Unlock</button>
+        <span class="error" id="login-error" role="alert"></span>
       </div>
-      <p class="note" id="slots"></p>
     </form>
   </section>
 
-  <h2>Your shares</h2>
-  <div id="list"><p class="empty">No shares started from this browser yet.</p></div>
-  <p class="note">Shares are remembered in this browser only. If you clear site data you can no longer manage them; they still stop when their time runs out.</p>
+  <div id="share"></div>
 </main>
 
 <script>
 (() => {
-  const STORE = "claude-share-instances";
+  const PW_STORE = "claude-share-manager-password";
   const $ = (id) => document.getElementById(id);
 
-  function loadOwned() {
-    try { return JSON.parse(localStorage.getItem(STORE) || "[]"); } catch { return []; }
-  }
-  function saveOwned(list) {
-    try { localStorage.setItem(STORE, JSON.stringify(list)); } catch {}
-  }
-  let owned = loadOwned();
-  const latest = new Map();
+  // The password is remembered in this browser only as a convenience
+  let password = "";
+  try { password = localStorage.getItem(PW_STORE) || ""; } catch {}
+  let passwordRequired = false;
+  let locked = false;
+  let latest = null;
 
   function el(tag, attrs = {}, ...children) {
     const n = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs)) {
+      if (v == null || v === false) continue;
       if (k === "class") n.className = v;
       else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
       else if (v !== false && v != null) n.setAttribute(k, v === true ? "" : v);
@@ -163,16 +126,20 @@
   function remaining(iso) {
     if (!iso) return "";
     const ms = new Date(iso).getTime() - Date.now();
-    if (ms <= 0) return "expired";
+    if (ms <= 0) return "now";
     const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
-    return h >= 48 ? `${Math.floor(h / 24)}d ${h % 24}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+    if (h >= 48) return `${Math.floor(h / 24)}d ${h % 24}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m`;
+    return `${Math.ceil(ms / 1000)}s`;
   }
   function ago(iso) {
     const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
     if (s < 10) return "just now";
     if (s < 60) return `${s}s ago`;
     if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-    return `${Math.floor(s / 3600)}h ago`;
+    if (s < 172800) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
   }
 
   async function copy(text, btn) {
@@ -189,12 +156,10 @@
     setTimeout(() => (btn.textContent = prev), 1500);
   }
 
-  async function api(method, url, entry, body) {
-    const headers = { "content-type": "application/json" };
-    if (entry) headers["x-owner-key"] = entry.ownerKey;
-    const pw = $("password").value;
-    if (pw) headers["x-manager-password"] = pw;
-    const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  async function api(method, url) {
+    const headers = {};
+    if (password) headers["x-manager-password"] = password;
+    const res = await fetch(url, { method, headers });
     const data = await res.json().catch(() => ({}));
     return { res, data };
   }
@@ -205,148 +170,146 @@
     return el("div", { class: "link" }, el("span", {}, label), input, btn);
   }
 
-  function renderInstance(entry) {
-    const d = latest.get(entry.id);
-    const state = d ? d.state : "loading";
-    const card = el("div", { class: "card" });
+  function render() {
+    const root = $("share");
+    root.replaceChildren();
+    $("login").hidden = !locked;
+    if (locked || !latest) return;
+    const d = latest;
+    $("title").textContent = d.name;
+    document.title = `${d.name} · claude-share`;
 
-    const title = el("div", {},
-      el("h3", {}, d?.name || entry.name),
-      el("div", { class: "meta" },
-        d ? `port ${d.port}` : "",
-        d?.sharedUntil && state === "running" ? ` · ${remaining(d.sharedUntil)} left` : "",
-      ),
-    );
-    card.append(el("div", { class: "inst-head" }, title, el("span", { class: `badge s-${state}` }, state)));
+    const card = el("section", { class: "card" });
+    const meta = [`port ${d.port}`, `token valid for ${remaining(d.tokenExpiresAt)}`];
+    card.append(el("div", { class: "inst-head" },
+      el("div", {}, el("h3", {}, "Share"), el("div", { class: "meta" }, meta.join(" · "))),
+      el("span", { class: `badge s-${d.state}` }, d.state),
+    ));
 
-    if (state === "gone") {
-      card.append(el("p", { class: "note" }, "This share no longer exists on the server (it was removed or the server restarted)."));
+    if (d.error && d.state !== "running") card.append(el("p", { class: "error" }, d.error));
+    if (d.state === "stopped") card.append(el("p", { class: "note" }, "The share is stopped. Starting it again creates a new session, so every device has to pair again."));
+    if (d.restartAt && d.state !== "running") card.append(el("p", { class: "note" }, `Restarting in ${remaining(d.restartAt)}…`));
+    if (d.tunnelDown) card.append(el("p", { class: "error" }, "The internet tunnel disconnected — only the direct link works."));
+    if (d.state !== "expired" && new Date(d.tokenExpiresAt).getTime() - Date.now() < 7 * 24 * 3600000) {
+      card.append(el("p", { class: "error" }, `The server's Claude token expires in ${remaining(d.tokenExpiresAt)} — set a new CLAUDE_TOKEN before then.`));
     }
-    if (d?.error) card.append(el("p", { class: "error" }, d.error));
-    if (d?.tunnelDown) card.append(el("p", { class: "error" }, "The internet tunnel disconnected — only the direct link works."));
-    if (d && state === "running" && new Date(d.tokenExpiresAt).getTime() - Date.now() < 24 * 3600000) {
-      card.append(el("p", { class: "error" }, `Your Claude token expires in ${remaining(d.tokenExpiresAt)} — after that, requests will fail.`));
-    }
 
-    if (state === "running") {
+    const actions = el("div", { class: "actions" });
+    if (d.state === "running") {
       if (d.connect.lan || d.connect.public) {
-        card.append(el("p", { class: "note" }, "One-time link — the first device that uses it is paired. Your friend runs:"));
+        card.append(el("p", { class: "note" }, "One-time link — the first device that uses it is paired. On that device, run:"));
         card.append(el("p", {}, el("code", {}, "claude-connect --share <link>")));
         if (d.connect.lan) card.append(linkRow("Direct", d.connect.lan));
         if (d.connect.public) card.append(linkRow("Tunnel", d.connect.public));
         if (d.tunnel && !d.connect.public) card.append(el("p", { class: "note" }, "Tunnel is not available."));
-      } else if (d.pairingCodeUsed) {
-        card.append(el("p", { class: "note" }, "The pairing link has been used. Create a new one to pair another device."));
+      } else {
+        card.append(el("p", { class: "note" }, "The last pairing link has been used. Create a new one to pair another device."));
       }
-
-      card.append(el("p", { class: "meta", style: "margin:16px 0 0" }, `Paired devices (${d.machines.length})`));
-      if (d.machines.length) {
-        card.append(el("ul", { class: "machines" }, d.machines.map((m) =>
-          el("li", {},
-            el("span", { class: "dot", style: `background:var(${m.active ? "--ok" : "--warn"})` }),
-            el("span", {}, m.name),
-            el("span", { class: "meta" }, `· ${m.active ? "active" : "idle"} · ${ago(m.lastActiveAt)}`),
-          ),
-        )));
-      }
-    } else if (state === "starting") {
+      actions.append(el("button", {
+        type: "button",
+        class: d.pairingCodeUsed ? "primary" : null,
+        onclick: () => act("regenerate"),
+      }, "New pairing link"));
+    } else if (d.state === "starting" || d.state === "restarting") {
       card.append(el("p", { class: "note" }, "Starting up…"));
     }
-
-    const actions = el("div", { class: "actions" });
-    if (state === "running" && d.pairingCodeUsed) {
-      actions.append(el("button", { type: "button", onclick: () => act(entry, "POST", "regenerate") }, "New pairing link"));
-    }
-    if (state === "running" || state === "starting") {
-      actions.append(el("button", { type: "button", class: "danger", onclick: () => act(entry, "POST", "stop") }, "Stop sharing"));
-    } else {
-      actions.append(el("button", { type: "button", onclick: () => remove(entry) }, "Remove"));
+    if (d.state === "stopped") {
+      actions.append(el("button", { type: "button", class: "primary", onclick: () => act("start") }, "Start share"));
+    } else if (d.state === "failed") {
+      actions.append(el("button", { type: "button", onclick: () => act("start") }, "Retry now"));
+      actions.append(confirmButton("stop", "Stop share", "Click again to stop", () => act("stop")));
+    } else if (d.state !== "expired") {
+      actions.append(confirmButton("stop", "Stop share", "Click again — all devices are unpaired", () => act("stop")));
     }
     card.append(actions);
-    return card;
+    root.append(card);
+
+    const devices = el("section", { class: "card" });
+    devices.append(el("h2", {}, `Paired devices (${d.machines.length})`));
+    if (!d.machines.length) {
+      devices.append(el("p", { class: "empty" }, d.state === "running" ? "No devices paired yet." : "Shown once the share is running."));
+    } else {
+      const sorted = [...d.machines].sort((a, b) => (b.active - a.active) || (new Date(b.lastActiveAt) - new Date(a.lastActiveAt)));
+      devices.append(el("ul", { class: "machines" }, sorted.map((m) =>
+        el("li", {},
+          el("span", { class: "dot", style: `background:var(${m.active ? "--ok" : "--muted"})` }),
+          el("span", {}, m.name),
+          el("span", { class: `state ${m.active ? "on" : "off"}` }, m.active ? "connected" : "disconnected"),
+          el("span", { class: "meta" }, m.active
+            ? `· ${m.sessions} session${m.sessions === 1 ? "" : "s"}`
+            : `· last seen ${ago(m.lastActiveAt)}`),
+          confirmButton(`rm:${m.id}`, "Remove", "Click again to remove", () =>
+            act(`machines/${encodeURIComponent(m.id)}/remove`), "small danger"),
+        ),
+      )));
+    }
+    devices.append(el("p", { class: "note" }, "Devices stay paired until you remove them or the server's token expires. Stopping the share or restarting the server starts a new session, and every device has to pair again."));
+    root.append(devices);
   }
 
-  function render() {
-    const list = $("list");
-    list.replaceChildren();
-    if (!owned.length) {
-      list.append(el("p", { class: "empty" }, "No shares started from this browser yet."));
-      return;
-    }
-    // Keep focus/selection stable: skip re-render while user is selecting a link
-    for (const entry of [...owned].reverse()) list.append(renderInstance(entry));
+  // Inline two-step confirm instead of a blocking dialog
+  let armed = null; // { key, at }
+  const isArmed = () => armed && Date.now() - armed.at < 4000;
+  function confirmButton(key, label, confirmLabel, onConfirm, cls = "danger") {
+    const live = isArmed() && armed.key === key;
+    const btn = el("button", { type: "button", class: cls }, live ? confirmLabel : label);
+    btn.addEventListener("click", () => {
+      if (isArmed() && armed.key === key) {
+        armed = null;
+        onConfirm();
+        return;
+      }
+      armed = { key, at: Date.now() };
+      render();
+      setTimeout(() => { if (armed && armed.key === key && !isArmed()) { armed = null; render(); } }, 4100);
+    });
+    return btn;
   }
 
   async function refresh() {
-    await Promise.all(owned.map(async (entry) => {
-      try {
-        const { res, data } = await api("GET", `/api/instances/${entry.id}`, entry);
-        if (res.status === 404) latest.set(entry.id, { state: "gone", name: entry.name });
-        else if (res.ok) latest.set(entry.id, data);
-      } catch {}
-    }));
+    if (locked) return;
+    try {
+      const { res, data } = await api("GET", "/api/share");
+      if (res.status === 401) {
+        locked = true;
+        if (password) $("login-error").textContent = "Wrong password.";
+      } else if (res.status === 429) {
+        locked = true;
+        $("login-error").textContent = data.error;
+      } else if (res.ok) {
+        latest = data;
+      }
+    } catch {}
+    // Keep focus/selection stable while the user is selecting a link
     const active = document.activeElement;
-    if (active && active.closest && active.closest("#list") && active.tagName === "INPUT") return;
+    if (!locked && active && active.closest && active.closest("#share") && active.tagName === "INPUT") return;
+    if (isArmed()) return;
     render();
   }
 
-  async function act(entry, method, action) {
-    await api(method, `/api/instances/${entry.id}/${action}`, entry);
+  async function act(action) {
+    await api("POST", `/api/share/${action}`);
     setTimeout(refresh, 400);
   }
 
-  async function remove(entry) {
-    const d = latest.get(entry.id);
-    if (d && d.state !== "gone") await api("DELETE", `/api/instances/${entry.id}`, entry);
-    owned = owned.filter((e) => e.id !== entry.id);
-    latest.delete(entry.id);
-    saveOwned(owned);
-    render();
-  }
-
-  async function loadConfig() {
-    try {
-      const cfg = await (await fetch("/api/config")).json();
-      $("password-wrap").hidden = !cfg.passwordRequired;
-      $("password").required = cfg.passwordRequired;
-      $("tunnel-wrap").hidden = !cfg.tunnelAvailable;
-      $("slots").textContent = `${cfg.freeSlots} free share slot${cfg.freeSlots === 1 ? "" : "s"} on this server.`;
-    } catch {}
-  }
-
-  $("create").addEventListener("submit", async (e) => {
+  $("login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const err = $("create-error");
-    err.textContent = "";
-    $("submit").disabled = true;
-    try {
-      const { res, data } = await api("POST", "/api/instances", null, {
-        name: $("name").value,
-        token: $("token").value,
-        durationHours: Number($("duration").value),
-        tunnel: $("tunnel").checked,
-        acceptTerms: $("terms").checked,
-      });
-      if (!res.ok) { err.textContent = data.error || `Failed (HTTP ${res.status})`; return; }
-      owned.push({ id: data.id, ownerKey: data.ownerKey, name: $("name").value.trim() });
-      saveOwned(owned);
-      $("token").value = "";
-      $("name").value = "";
-      $("terms").checked = false;
-      await refresh();
-      loadConfig();
-    } catch (ex) {
-      err.textContent = "Could not reach the server.";
-    } finally {
-      $("submit").disabled = false;
-    }
+    password = $("password").value;
+    $("login-error").textContent = "";
+    try { localStorage.setItem(PW_STORE, password); } catch {}
+    locked = false;
+    await refresh();
   });
 
-  loadConfig();
-  render();
-  refresh();
-  setInterval(refresh, 2000);
-  setInterval(loadConfig, 15000);
+  (async () => {
+    try {
+      passwordRequired = (await (await fetch("/api/config")).json()).passwordRequired;
+    } catch {}
+    locked = passwordRequired && !password;
+    render();
+    await refresh();
+    setInterval(refresh, 2000);
+  })();
 })();
 </script>
 </body>

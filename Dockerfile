@@ -29,8 +29,7 @@ ENV NODE_ENV=production \
     CLAUDE_SHARE_LOG_DIR=/var/log/claude-share \
     CLAUDE_SHARE_LOG_RETENTION_DAYS=1 \
     MANAGER_PORT=8080 \
-    SHARE_PORT_START=2586 \
-    SHARE_PORT_END=2595
+    SHARE_PORT=2586
 WORKDIR /app
 # The bundles are self-contained — no node_modules needed at runtime
 COPY --from=build /app/dist ./dist
@@ -39,7 +38,7 @@ COPY --from=bore /usr/local/bin/bore /usr/local/bin/bore
 RUN mkdir -p /var/log/claude-share && chown node:node /var/log/claude-share
 VOLUME /var/log/claude-share
 USER node
-EXPOSE 8080 2586-2595
+EXPOSE 8080 2586
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD node -e "fetch('http://127.0.0.1:'+process.env.MANAGER_PORT+'/api/config').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 CMD ["node", "dist/manager/index.js"]

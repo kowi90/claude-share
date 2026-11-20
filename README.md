@@ -127,28 +127,31 @@ npx -p @0xpv/claude-share claude-connect --share <connect-url>
 
 ## Docker server with web interface
 
-Run claude-share on a server so several people can each start their own share from a browser.
+Run an always-on share of one Claude subscription on a server. Any device can pair itself from the web page.
 
 ```bash
-cp .env.docker.example .env # set ADVERTISE_HOST (and MANAGER_PASSWORD)
+claude setup-token          # on your own machine; copy the sk-ant-oat… token
+cp .env.docker.example .env # set ADVERTISE_HOST, CLAUDE_TOKEN and MANAGER_PASSWORD
 docker compose up -d --build
 ```
 
-Open `http://<server>:8080`, paste a token from `claude setup-token`, pick a duration and press **Start share**. The page shows a one-time `claudeshare://` link to send to the receiver, who runs `claude-connect --share <link>` as usual.
+The share starts with the container. Open `http://<server>:8080` from any machine and enter the manager password. The page shows the same view to everyone: a one-time `claudeshare://` link (run `claude-connect --share <link>` on the device to pair), a **New pairing link** button for the next device, and the paired devices with whether each one is connected right now. Devices stay paired until you **Remove** them (which also cuts their open connections) or the token expires; the share lives exactly as long as the token. **Stop share** takes it down until you start it again.
 
 | Variable | Purpose |
 | --- | --- |
 | `ADVERTISE_HOST` | **Required.** IP or hostname receivers use to reach the server. Goes into the connect links and the TLS certificate. |
-| `MANAGER_PASSWORD` | Required to create shares when set. Leave empty to let anyone who can reach the page create one. |
-| `SHARE_PORT_START` / `SHARE_PORT_END` | Port range, one port per concurrent share (default `2586`–`2595`). Must match the `ports:` mapping, with host port = container port. |
-| `TUNNEL` | `0` hides the bore internet tunnel option. |
+| `CLAUDE_TOKEN` | **Required.** Output of `claude setup-token`. Or set `CLAUDE_TOKEN_FILE` to a file holding it (e.g. a Docker secret). |
+| `MANAGER_PASSWORD` | Required to open the web page. Leave it empty only on a fully trusted network: anyone who can open the page can pair a device. |
+| `SHARE_NAME` | Name shown to receivers and as the page title (default `claude-share`). |
+| `SHARE_PORT` | Port of the share (default `2586`). Must match the `ports:` mapping, with host port = container port. |
+| `TUNNEL` | `1` also exposes the share over the internet via bore. |
 | `BORE_SERVER` / `BORE_PASSWORD` | Build args for a self-hosted bore server. |
 | `LOG_HOST_DIR` | Host directory for log files (default `./logs`). Must be writable by uid 1000: `mkdir -p logs && sudo chown 1000:1000 logs`. |
 | `LOG_RETENTION_DAYS` | Days of old log files kept besides today's (default `1`, `0` = today only). |
 
 Logs go to `manager-YYYY-MM-DD.log` (the web manager, plus each share's stderr and exit code) and `share-YYYY-MM-DD.log` (every share process, tagged with pid and port). A new file starts each day (UTC) and older ones are deleted. When a share fails, look up its port in `share-*.log`: the reason is logged just before `process exiting with code 1`. Tokens and pairing codes are never logged.
 
-Each share runs as its own `claude-share --headless` process. The token is handed to it over IPC and never written to disk, so shares don't survive a container restart: start them again from the page. Each share is managed only from the browser that created it.
+The share runs as a `claude-share --headless` child process. The manager hands it the token over IPC, so the token never reaches its argv, environment or disk. The manager restarts the share when it crashes (with backoff). Once the token expires the page says so and the share stays down until you set a new `CLAUDE_TOKEN`. Pairings live in memory, so after stopping the share or restarting the container every device has to pair again with a new link.
 
 The web interface is plain HTTP and shows the connect link, which contains the pairing key. Put it behind an HTTPS reverse proxy, or only reach it over a trusted network.
 

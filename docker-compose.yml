@@ -13,14 +13,17 @@ services:
       # The IP or hostname receivers use to reach this server. Put into connect
       # links and the TLS certificate, so it must be exactly what they connect to.
       ADVERTISE_HOST: ${ADVERTISE_HOST:?set ADVERTISE_HOST to this server's IP or hostname}
-      # Required to create shares when set. Leave empty to let anyone who can
-      # reach the web interface start a share.
+      # The Claude subscription to share: the output of `claude setup-token`.
+      # Handed to the share process over IPC only, never written to disk.
+      CLAUDE_TOKEN: ${CLAUDE_TOKEN:?set CLAUDE_TOKEN to the output of claude setup-token}
+      # Shown to receivers and as the page title
+      SHARE_NAME: ${SHARE_NAME:-claude-share}
+      # Required to open the web page (which shows pairing links). Leave empty
+      # only on a fully trusted network.
       MANAGER_PASSWORD: ${MANAGER_PASSWORD:-}
-      # Set to 0 to hide the bore internet tunnel option
-      TUNNEL: ${TUNNEL:-1}
-      # One port per concurrent share. Keep in sync with the port mapping below.
-      SHARE_PORT_START: 2586
-      SHARE_PORT_END: 2595
+      # Set to 1 to also expose the share over the internet via bore
+      TUNNEL: ${TUNNEL:-0}
+      SHARE_PORT: 2586
       # Days of old log files kept besides today's (0 = today only)
       CLAUDE_SHARE_LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-1}
     volumes:
@@ -30,4 +33,4 @@ services:
       - ${LOG_HOST_DIR:-./logs}:/var/log/claude-share
     ports:
       - "${MANAGER_HOST_PORT:-8080}:8080"   # web interface
-      - "2586-2595:2586-2595"              # share instances (host port must equal container port)
+      - "2586:2586"                        # the share (host port must equal container port)
