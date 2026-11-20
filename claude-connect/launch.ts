@@ -98,6 +98,53 @@ export async function sessionPost(
 
 // ── Launch ────────────────────────────────────────────────────────────────────
 
+// ── Child environment ─────────────────────────────────────────────────────────
+
+/**
+ * The session CA plus whatever the user already trusts via NODE_EXTRA_CA_CERTS
+ * (e.g. Avast/ESET/Kaspersky set it system-wide on Windows for HTTPS scanning).
+ * Replacing their bundle outright would break that; dropping ours breaks us.
+ */
+function buildCaBundle(caPem: string): string {
+  const parts = [caPem.trim()];
+  const existing = getEnvInsensitive("NODE_EXTRA_CA_CERTS");
+  if (existing) {
+    try {
+      const pem = fs.readFileSync(existing, "utf8").trim();
+      if (pem.includes("-----BEGIN CERTIFICATE-----")) parts.push(pem);
+    } catch (err) {
+      logger.warn("Could not read existing NODE_EXTRA_CA_CERTS", {
+        path: existing,
+        err: String(err),
+      });
+    }
+  }
+  return parts.join("\n") + "\n";
+}
+
+function getEnvInsensitive(name: string): string | undefined {
+  const key = Object.keys(process.env).find(
+    (k) => k.toUpperCase() === name.toUpperCase(),
+  );
+  return key ? process.env[key] : undefined;
+}
+
+/**
+ * process.env plus overrides. Windows env names are case-insensitive, so an
+ * inherited `Node_Extra_CA_Certs` would sit beside our `NODE_EXTRA_CA_CERTS`
+ * and the child could pick the inherited one. Drop every case variant first.
+ */
+function withEnvOverrides(
+  overrides: Record<string, string>,
+): NodeJS.ProcessEnv {
+  const upper = new Set(Object.keys(overrides).map((k) => k.toUpperCase()));
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!upper.has(k.toUpperCase())) env[k] = v;
+  }
+  return { ...env, ...overrides };
+}
+
 export async function launchClaude(
   proxyUrl: string,
   caPem: string,
@@ -126,7 +173,7 @@ export async function launchClaude(
   }
 
   const tmpCert = path.join(os.tmpdir(), `claude-share-ca-${Date.now()}.pem`);
-  fs.writeFileSync(tmpCert, caPem, { mode: 0o600 });
+  fs.writeFileSync(tmpCert, buildCaBundle(caPem), { mode: 0o600 });
 
   const proxyAuth =
     "Basic " +
@@ -183,14 +230,13 @@ export async function launchClaude(
 
   const child = await spawnCommand("claude", claudeArgs, {
     stdio: "inherit",
-    env: {
-      ...process.env,
+    env: withEnvOverrides({
       HTTPS_PROXY: httpProxyUrl,
       HTTP_PROXY: httpProxyUrl,
       NODE_EXTRA_CA_CERTS: tmpCert,
       SSL_CERT_FILE: tmpCert,
       CURL_CA_BUNDLE: tmpCert,
-    },
+    }),
   });
 
   async function cleanupAndExit(code: number | null) {

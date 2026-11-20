@@ -5,3 +5,4 @@ dist/
 .http-mitm-proxy
 claude-share-dev.log
 logs/
+.idea/
