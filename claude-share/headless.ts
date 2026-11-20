@@ -98,6 +98,10 @@ export async function receiveInit(): Promise<{ systemName?: string }> {
 
   const creds = init.credentials;
   if (!creds?.accessToken) return headlessFail("no access token provided");
+  // Would otherwise throw "Invalid character in header content" on the first proxied request
+  if (!/^[\x21-\x7e]+$/.test(creds.accessToken)) {
+    return headlessFail("the provided Claude token contains whitespace or invalid characters");
+  }
   if (creds.expiresAt <= Date.now()) {
     return headlessFail("the provided Claude token has already expired");
   }

@@ -125,6 +125,10 @@ function allocatePort(): number | null {
   return null;
 }
 
+// OAuth tokens are URL-safe base64-ish; anything else would be rejected by
+// Node as an HTTP header value and crash the share on its first request
+const TOKEN_RE = /^[A-Za-z0-9._~+/=-]+$/;
+
 /**
  * Accepts either a long-lived token from `claude setup-token` (recommended) or
  * the JSON credentials blob Claude Code stores (`claudeAiOauth`). The JSON
@@ -139,8 +143,12 @@ function parseCredentials(input: string): OAuthCredentials | { error: string } {
       if (typeof c.accessToken !== "string" || typeof c.expiresAt !== "number") {
         return { error: "JSON must contain claudeAiOauth.accessToken and expiresAt" };
       }
+      const accessToken = c.accessToken.replace(/\s+/g, "");
+      if (!TOKEN_RE.test(accessToken)) {
+        return { error: "accessToken contains invalid characters" };
+      }
       return {
-        accessToken: c.accessToken,
+        accessToken,
         refreshToken: c.refreshToken ?? "",
         expiresAt: c.expiresAt,
         scopes: c.scopes ?? [],
@@ -151,16 +159,21 @@ function parseCredentials(input: string): OAuthCredentials | { error: string } {
       return { error: "Credentials are not valid JSON" };
     }
   }
-  if (raw.startsWith("sk-ant-oat")) {
+  // A long token copied from a terminal often has line breaks where it wrapped
+  const token = raw.replace(/\s+/g, "");
+  if (token.startsWith("sk-ant-oat")) {
+    if (!TOKEN_RE.test(token)) {
+      return { error: "The token contains invalid characters — paste only the sk-ant-oat… token" };
+    }
     return {
-      accessToken: raw,
+      accessToken: token,
       refreshToken: "",
       expiresAt: Date.now() + SETUP_TOKEN_LIFETIME_MS,
       scopes: ["user:inference"],
       subscriptionType: "unknown",
     };
   }
-  if (raw.startsWith("sk-ant-api")) {
+  if (token.startsWith("sk-ant-api")) {
     return { error: "API keys are not supported — use a token from `claude setup-token`" };
   }
   return { error: "Unrecognised token — paste the output of `claude setup-token`" };
