@@ -11,9 +11,11 @@ let refreshTimer: NodeJS.Timeout | null = null;
 // we're never caught with a stale token.
 function scheduleTokenReread(creds: OAuthCredentials): void {
   if (refreshTimer) clearTimeout(refreshTimer);
-  const msUntilReread = Math.max(
-    creds.expiresAt - Date.now() - 5 * 60 * 1000,
-    60_000,
+  // Capped: setTimeout fires immediately for delays over 2^31-1 ms (~24.8 days),
+  // which a year-long `claude setup-token` token would otherwise hit in a loop
+  const msUntilReread = Math.min(
+    Math.max(creds.expiresAt - Date.now() - 5 * 60 * 1000, 60_000),
+    24 * 60 * 60 * 1000,
   );
   refreshTimer = setTimeout(async () => {
     try {
