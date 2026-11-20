@@ -21,6 +21,13 @@ services:
       # One port per concurrent share. Keep in sync with the port mapping below.
       SHARE_PORT_START: 2586
       SHARE_PORT_END: 2595
+      # Days of old log files kept besides today's (0 = today only)
+      CLAUDE_SHARE_LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-1}
+    volumes:
+      # Daily log files from the manager and every share instance. The
+      # directory must be writable by uid 1000 (the container's "node" user):
+      #   mkdir -p logs && sudo chown 1000:1000 logs
+      - ${LOG_HOST_DIR:-./logs}:/var/log/claude-share
     ports:
       - "${MANAGER_HOST_PORT:-8080}:8080"   # web interface
       - "2586-2595:2586-2595"              # share instances (host port must equal container port)

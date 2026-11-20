@@ -23,14 +23,28 @@ if (process.argv.includes("-v") || process.argv.includes("--version")) {
   process.exit(0);
 }
 
-process.on("uncaughtException", (err) => {
-  logger.error("Uncaught exception", err);
-  process.exit(1);
-});
+logger.info(
+  `claude-share ${pkg.version} starting (node ${process.version}, ${process.platform}/${process.arch})`,
+  { args: process.argv.slice(2) },
+);
 
-process.on("unhandledRejection", (reason) => {
-  logger.error("Unhandled rejection", reason);
-  process.exit(1);
+// In headless mode the console is silenced and the manager only sees stderr
+// and IPC, so crashes must be reported there too or they show up as a bare
+// "exited with code 1".
+function crash(what: string, reason: unknown): void {
+  logger.error(what, reason);
+  if (process.argv.includes("--headless")) {
+    const detail = reason instanceof Error ? reason.message : String(reason);
+    void headlessFail(`${what}: ${detail}`);
+  } else {
+    process.exit(1);
+  }
+}
+process.on("uncaughtException", (err) => crash("Uncaught exception", err));
+process.on("unhandledRejection", (reason) => crash("Unhandled rejection", reason));
+
+process.on("exit", (code) => {
+  logger[code === 0 ? "info" : "error"](`process exiting with code ${code}`);
 });
 
 // Exits with a clear error if the platform is unsupported

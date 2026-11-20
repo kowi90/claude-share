@@ -15,6 +15,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
+import { createLogger, LOG_DIR } from "@shared/logger";
 import type { OAuthCredentials } from "@shared/platforms";
 import type {
   ChildMessage,
@@ -22,6 +23,42 @@ import type {
   ParentMessage,
 } from "../claude-share/headless";
 import uiHtml from "./ui.html" with { type: "text" };
+
+// ── Logging ─────────────────────────────────────────────────────────────────
+// Everything goes to stdout/stderr (docker logs) and to the daily log file.
+
+const fileLog = createLogger("manager", "manager");
+
+function log(msg: string, extra?: unknown): void {
+  process.stdout.write(`${new Date().toISOString()} ${msg}\n`);
+  fileLog.info(msg, extra);
+}
+
+function logError(msg: string, extra?: unknown): void {
+  const detail = extra instanceof Error ? ` ${extra.stack ?? extra.message}` : extra !== undefined ? ` ${String(extra)}` : "";
+  process.stderr.write(`${new Date().toISOString()} ERROR ${msg}${detail}\n`);
+  fileLog.error(msg, extra);
+}
+
+/** Logs a fatal startup/config problem and exits with code 1. */
+function die(msg: string): never {
+  logError(msg);
+  process.exit(1);
+}
+
+process.on("uncaughtException", (err) => {
+  logError("uncaught exception", err);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  logError("unhandled rejection", reason);
+  process.exit(1);
+});
+process.on("exit", (code) => {
+  fileLog[code === 0 ? "info" : "error"](`manager exiting with code ${code}`);
+});
+
+log(`manager starting (node ${process.version}), logs in ${LOG_DIR}`);
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -36,13 +73,12 @@ const DURATIONS_H = [6, 24, 168] as const;
 const SETUP_TOKEN_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
 
 if (!Number.isInteger(PORT_START) || !Number.isInteger(PORT_END) || PORT_END < PORT_START) {
-  process.stderr.write("SHARE_PORT_START / SHARE_PORT_END are invalid\n");
-  process.exit(1);
+  die(`SHARE_PORT_START / SHARE_PORT_END are invalid (${process.env.SHARE_PORT_START}-${process.env.SHARE_PORT_END})`);
 }
 if (!ADVERTISE_HOST) {
-  process.stderr.write(
+  logError(
     "warning: ADVERTISE_HOST is not set — connect links will use the container's " +
-      "internal IP and won't be reachable from other machines.\n",
+      "internal IP and won't be reachable from other machines.",
   );
 }
 
@@ -51,10 +87,7 @@ const SHARE_ENTRY = [
   path.join(here, "../claude-share/index.js"),
   path.join(here, "../claude-share/index.ts"),
 ].find((f) => fs.existsSync(f));
-if (!SHARE_ENTRY) {
-  process.stderr.write("could not find the claude-share entry point\n");
-  process.exit(1);
-}
+if (!SHARE_ENTRY) die(`could not find the claude-share entry point next to ${here}`);
 
 // ── Instances ───────────────────────────────────────────────────────────────
 
@@ -155,30 +188,50 @@ function startInstance(
     env,
   });
   inst.child = child;
+  const label = `instance ${inst.id.slice(0, 8)} :${inst.port}`;
+  log(`${label} spawned (pid ${child.pid}, tunnel=${inst.tunnel}, duration=${durationMs}ms)`);
 
+  child.on("error", (err) => logError(`${label} process error`, err));
+
+  // Keep a tail for the UI error message and log every stderr line
   let stderrTail = "";
+  let partial = "";
   child.stderr?.on("data", (chunk: Buffer) => {
-    stderrTail = (stderrTail + chunk.toString()).slice(-2000);
+    const text = chunk.toString();
+    stderrTail = (stderrTail + text).slice(-2000);
+    const lines = (partial + text).split("\n");
+    partial = lines.pop() ?? "";
+    for (const line of lines) if (line.trim()) logError(`${label} stderr: ${line}`);
+  });
+  child.stderr?.on("end", () => {
+    if (partial.trim()) logError(`${label} stderr: ${partial}`);
+    partial = "";
   });
 
   child.on("message", (msg: ChildMessage) => {
     if (msg?.type === "status") {
       inst.status = msg.status;
-      if (inst.state === "starting") inst.state = "running";
+      if (inst.state === "starting") {
+        inst.state = "running";
+        log(`${label} running`);
+      }
     } else if (msg?.type === "fatal") {
       inst.error = msg.message;
+      logError(`${label} reported fatal error: ${msg.message}`);
     }
   });
 
-  child.on("exit", (code) => {
+  child.on("exit", (code, signal) => {
     inst.child = null;
+    const how = signal ? `killed by ${signal}` : `exited with code ${code}`;
     if (code === 0) {
       inst.state = "stopped";
+      log(`${label} ${how}`);
     } else {
       inst.state = "failed";
-      inst.error ??= stderrTail.trim().split("\n").pop() || `exited with code ${code}`;
+      inst.error ??= stderrTail.trim().split("\n").pop() || how;
+      logError(`${label} ${how}: ${inst.error} (see share-*.log for details)`);
     }
-    log(`instance ${inst.id.slice(0, 8)} on :${inst.port} exited (${code})`);
   });
 
   // Credentials go over IPC only — never argv, env or disk
@@ -221,10 +274,6 @@ function serialize(inst: Instance) {
     },
     machines: live ? s.machines : [],
   };
-}
-
-function log(msg: string): void {
-  process.stdout.write(`${new Date().toISOString()} ${msg}\n`);
 }
 
 // ── HTTP API ────────────────────────────────────────────────────────────────
@@ -273,13 +322,19 @@ app.post("/api/instances", async (c) => {
   }
 
   const creds = parseCredentials(body.token ?? "");
-  if ("error" in creds) return c.json({ error: creds.error }, 400);
+  if ("error" in creds) {
+    log(`share request rejected: ${creds.error}`);
+    return c.json({ error: creds.error }, 400);
+  }
   if (creds.expiresAt <= Date.now()) {
     return c.json({ error: "This token has already expired" }, 400);
   }
 
   const port = allocatePort();
-  if (port === null) return c.json({ error: "No free ports — all share slots are in use" }, 503);
+  if (port === null) {
+    log("share request rejected: no free ports");
+    return c.json({ error: "No free ports — all share slots are in use" }, 503);
+  }
 
   const ownerKey = crypto.randomBytes(32).toString("base64url");
   const inst: Instance = {
@@ -297,7 +352,6 @@ app.post("/api/instances", async (c) => {
   };
   instances.set(inst.id, inst);
   startInstance(inst, creds, hours * 60 * 60 * 1000);
-  log(`instance ${inst.id.slice(0, 8)} started on :${port}`);
 
   return c.json({ id: inst.id, ownerKey }, 201);
 });
@@ -327,6 +381,7 @@ app.post("/api/instances/:id/regenerate", (c) => {
 app.post("/api/instances/:id/stop", (c) => {
   const inst = ownedInstance(c.req.param("id"), c.req.header("x-owner-key"));
   if (!inst) return c.json(NOT_FOUND, 404);
+  log(`instance ${inst.id.slice(0, 8)} :${inst.port} stop requested`);
   sendToChild(inst, { type: "stop" });
   return c.json({ ok: true });
 });
@@ -334,6 +389,7 @@ app.post("/api/instances/:id/stop", (c) => {
 app.delete("/api/instances/:id", (c) => {
   const inst = ownedInstance(c.req.param("id"), c.req.header("x-owner-key"));
   if (!inst) return c.json(NOT_FOUND, 404);
+  log(`instance ${inst.id.slice(0, 8)} :${inst.port} deleted`);
   sendToChild(inst, { type: "stop" });
   const child = inst.child;
   if (child) setTimeout(() => child.kill("SIGKILL"), 5000).unref();
@@ -341,15 +397,21 @@ app.delete("/api/instances/:id", (c) => {
   return c.json({ ok: true });
 });
 
-serve({ fetch: app.fetch, port: MANAGER_PORT, hostname: "0.0.0.0" }, () => {
+const server = serve({ fetch: app.fetch, port: MANAGER_PORT, hostname: "0.0.0.0" }, () => {
   log(`claude-share manager listening on :${MANAGER_PORT}`);
   log(`share ports ${PORT_START}-${PORT_END}, advertised as ${ADVERTISE_HOST ?? "(auto)"}${ADVERTISE_HOST && !isIP(ADVERTISE_HOST) ? " (hostname)" : ""}`);
   if (!MANAGER_PASSWORD) log("MANAGER_PASSWORD is not set — anyone who can reach this page can create shares");
 });
 
-function shutdown() {
+server.on("error", (err) => {
+  logError(`manager HTTP server error on :${MANAGER_PORT}`, err);
+  process.exit(1);
+});
+
+function shutdown(signal: string) {
+  log(`received ${signal}, stopping ${instances.size} instance(s)`);
   for (const inst of instances.values()) sendToChild(inst, { type: "stop" });
   setTimeout(() => process.exit(0), 1500).unref();
 }
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));

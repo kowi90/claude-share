@@ -143,6 +143,10 @@ Open `http://<server>:8080`, paste a token from `claude setup-token`, pick a dur
 | `SHARE_PORT_START` / `SHARE_PORT_END` | Port range, one port per concurrent share (default `2586`–`2595`). Must match the `ports:` mapping, with host port = container port. |
 | `TUNNEL` | `0` hides the bore internet tunnel option. |
 | `BORE_SERVER` / `BORE_PASSWORD` | Build args for a self-hosted bore server. |
+| `LOG_HOST_DIR` | Host directory for log files (default `./logs`). Must be writable by uid 1000: `mkdir -p logs && sudo chown 1000:1000 logs`. |
+| `LOG_RETENTION_DAYS` | Days of old log files kept besides today's (default `1`, `0` = today only). |
+
+Logs go to `manager-YYYY-MM-DD.log` (the web manager, plus each share's stderr and exit code) and `share-YYYY-MM-DD.log` (every share process, tagged with pid and port). A new file starts each day (UTC) and older ones are deleted. When a share fails, look up its port in `share-*.log`: the reason is logged just before `process exiting with code 1`. Tokens and pairing codes are never logged.
 
 Each share runs as its own `claude-share --headless` process. The token is handed to it over IPC and never written to disk, so shares don't survive a container restart: start them again from the page. Each share is managed only from the browser that created it.
 

@@ -3,6 +3,7 @@
 // they are never written to disk or put in the environment.
 
 import { setPlatformOverride, type OAuthCredentials } from "@shared/platforms";
+import { logger } from "./logger";
 import { getSession, regeneratePairingCode } from "./session/manager";
 
 export interface HeadlessMachine {
@@ -42,14 +43,20 @@ function send(msg: ChildMessage): void {
 }
 
 /** Reports a fatal error to the parent (and stderr), then exits. */
+let failing = false;
+
 export async function headlessFail(message: string): Promise<never> {
+  if (failing) return new Promise<never>(() => {}); // already exiting
+  failing = true;
+  logger.error(`fatal: ${message}`);
   process.stderr.write(`claude-share: ${message}\n`);
   if (process.send && process.connected) {
-    await new Promise<void>((resolve) =>
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 2000); // don't hang if the send never completes
       process.send!({ type: "fatal", message } satisfies ChildMessage, () =>
         resolve(),
-      ),
-    );
+      );
+    });
   }
   process.exit(1);
 }
@@ -87,6 +94,7 @@ export async function receiveInit(): Promise<{ systemName?: string }> {
     },
   );
   if (!init) return headlessFail("timed out waiting for credentials");
+  logger.info("received init from manager");
 
   const creds = init.credentials;
   if (!creds?.accessToken) return headlessFail("no access token provided");
@@ -147,8 +155,12 @@ export function startHeadlessReporting(
       if (session) regeneratePairingCode(session);
       report();
     } else if (msg?.type === "stop") {
+      logger.info("stop requested by manager");
       onStop();
     }
   });
-  process.on("disconnect", onStop);
+  process.on("disconnect", () => {
+    logger.warn("IPC channel to manager disconnected, stopping");
+    onStop();
+  });
 }
